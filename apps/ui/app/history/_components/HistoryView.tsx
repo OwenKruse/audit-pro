@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { EyeOff, FileWarning, MessageCircle, Repeat } from 'lucide-react';
+import { EyeOff, FileWarning, MessageCircle, Repeat, Trash2 } from 'lucide-react';
 import { dispatchRunnerReference } from '@/lib/chat-references';
 import { Button } from '@/components/ui/button';
 import {
@@ -140,6 +140,7 @@ export function HistoryView(props: { initialSelectedId?: string | null; initialS
   const [filterMethod, setFilterMethod] = useState<string>('all');
   const [filterScheme, setFilterScheme] = useState<'all' | 'http' | 'https' | 'ws' | 'wss'>('all');
   const [filterStatus, setFilterStatus] = useState<'all' | '2xx' | '3xx' | '4xx' | '5xx' | 'error'>('all');
+  const [clearLoading, setClearLoading] = useState(false);
 
   const parentRef = useRef<HTMLDivElement>(null);
   const loadingMoreRef = useRef(false);
@@ -433,7 +434,38 @@ export function HistoryView(props: { initialSelectedId?: string | null; initialS
             <option value="error">Error / No response</option>
           </select>
         </div>
-        <div className="ml-auto text-[10px] font-bold uppercase text-[color:var(--cs-muted)]">{items.length} Results</div>
+        <div className="ml-auto flex items-center gap-2">
+          <span className="text-[10px] font-bold uppercase text-[color:var(--cs-muted)]">{items.length} Results</span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-[color:var(--cs-muted)] hover:text-[color:var(--cs-fg)] disabled:opacity-50"
+                onClick={async () => {
+                  if (clearLoading) return;
+                  setClearLoading(true);
+                  try {
+                    const res = await fetch('/api/messages/clear', { method: 'DELETE', cache: 'no-store' });
+                    if (res.ok) void loadFirstPage();
+                  } finally {
+                    setClearLoading(false);
+                  }
+                }}
+                disabled={clearLoading}
+                aria-label="Clear HTTP history"
+              >
+                {clearLoading ? (
+                  <span className="h-3.5 w-3.5 animate-pulse rounded-full bg-[color:var(--cs-muted)]" />
+                ) : (
+                  <Trash2 className="h-3.5 w-3.5" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Clear history</TooltipContent>
+          </Tooltip>
+        </div>
       </div>
 
       <HorizontalResizable storageKey="history-inspector-width" defaultRatio={0.33}>

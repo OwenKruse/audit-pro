@@ -45,7 +45,7 @@ import {
   type AiProvider,
 } from '@cipherscope/proto';
 import { createMetrics } from './metrics.js';
-import { deleteHttpMessage, getHttpMessage, getSitemap, listHttpMessages, listWsFrames } from './store.js';
+import { deleteAllHttpMessages, deleteHttpMessage, getHttpMessage, getSitemap, listHttpMessages, listWsFrames } from './store.js';
 import { listWsConnections } from './store.js';
 import { ProxyController } from './proxy.js';
 import { ReplayError, replayBatch, replayOnce } from './replay.js';
@@ -767,6 +767,11 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
     const payload = { ok: true, item };
     GetMessageResponseSchema.parse(payload);
     return payload;
+  });
+
+  app.delete('/messages/clear', async () => {
+    const deleted = deleteAllHttpMessages(projects.db());
+    return { ok: true as const, deleted };
   });
 
   app.delete('/messages/:id', async (req, reply) => {

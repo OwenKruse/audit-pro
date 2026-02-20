@@ -1,8 +1,15 @@
 'use client';
 
 import { ContractAuditRunResponseSchema } from '@cipherscope/proto';
+import { Trash2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
+import { Button } from '@/components/ui/button';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import {
   saveContractSandboxPrefill,
   useRpcInteractions,
@@ -238,13 +245,21 @@ export function RpcHistoryPanel(props: {
         </div>
         <div className="ml-auto flex items-center gap-2">
           <div className="text-[10px] font-bold uppercase text-[color:var(--cs-muted)]">{filtered.length} Results</div>
-          <button
-            type="button"
-            onClick={onClearHistory}
-            className="h-7 rounded-md border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] px-2 text-[11px] font-medium text-[color:var(--cs-fg)] hover:bg-[color:var(--cs-hover)]"
-          >
-            Clear History
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-[color:var(--cs-muted)] hover:text-[color:var(--cs-fg)]"
+                onClick={onClearHistory}
+                aria-label="Clear history"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Clear history</TooltipContent>
+          </Tooltip>
         </div>
       </div>
 

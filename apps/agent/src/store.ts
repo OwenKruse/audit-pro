@@ -527,6 +527,11 @@ export function deleteHttpMessage(db: DatabaseSync, id: string): boolean {
   return true;
 }
 
+export function deleteAllHttpMessages(db: DatabaseSync): number {
+  const result = db.prepare(`DELETE FROM http_messages`).run() as { changes: number };
+  return result.changes ?? 0;
+}
+
 export type InsertWsConnectionInput = {
   id: string;
   createdAt: string;

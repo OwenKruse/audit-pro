@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
+import { ChatMarkdown } from '@/components/ui/chat-markdown';
 import { Textarea } from '@/components/ui/textarea';
 import { getSelectedAiModel, useAiSettings } from '@/lib/ai-settings';
 import {
@@ -1144,7 +1145,13 @@ export function RunnerPanel() {
                         : 'border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] text-[color:var(--cs-fg)]',
                     ].join(' ')}
                   >
-                    <div className="text-[14px] leading-relaxed break-words whitespace-pre-wrap">{message.content}</div>
+                    {isUser ? (
+                      <div className="text-[14px] leading-relaxed break-words whitespace-pre-wrap">
+                        {message.content}
+                      </div>
+                    ) : (
+                      <ChatMarkdown content={message.content} />
+                    )}
                     <div
                       className={[
                         'mt-2 flex items-center justify-between gap-2 text-[11px]',
@@ -1193,8 +1200,8 @@ export function RunnerPanel() {
                   className="rounded-lg border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] p-3"
                 >
                   <div className="text-[12px] text-[color:var(--cs-muted)]">{formatTime(item.createdAt)}</div>
-                  <div className="mt-1 text-sm break-words whitespace-pre-wrap text-[color:var(--cs-fg)]">
-                    {item.content}
+                  <div className="mt-1 text-sm text-[color:var(--cs-fg)]">
+                    <ChatMarkdown content={item.content} className="text-[13px]" />
                   </div>
                 </div>
               ))}
@@ -1223,7 +1230,13 @@ export function RunnerPanel() {
               {messages.slice(-12).map((item) => (
                 <div key={`flow_${item.id}`} className="rounded-lg border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] p-3">
                   <div className="text-[11px] uppercase text-[color:var(--cs-muted)]">{item.role}</div>
-                  <div className="mt-1 text-sm break-words whitespace-pre-wrap text-[color:var(--cs-fg)]">{item.content}</div>
+                  <div className="mt-1 text-sm text-[color:var(--cs-fg)]">
+                    {item.role === 'assistant' ? (
+                      <ChatMarkdown content={item.content} className="text-[13px]" />
+                    ) : (
+                      <div className="break-words whitespace-pre-wrap">{item.content}</div>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
