@@ -1,0 +1,28 @@
+{
+  "name": "@cipherscope/agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cipherscope/proto": "workspace:*",
+    "@fastify/websocket": "^11.0.2",
+    "fastify": "^5.2.1",
+    "fflate": "^0.8.2",
+    "node-forge": "^1.3.1",
+    "viem": "^2.45.2",
+    "ws": "^8.19.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node-forge": "^1.3.11",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.2"
+  }
+}

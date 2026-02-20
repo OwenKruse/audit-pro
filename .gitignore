@@ -1,0 +1,17 @@
+node_modules
+.pnpm-store
+.next
+dist
+coverage
+.DS_Store
+
+# Local env and secrets
+.env
+.env.*
+!.env.example
+
+# Local agent data
+apps/agent/.data
+apps/agent/data
+.data
+data
