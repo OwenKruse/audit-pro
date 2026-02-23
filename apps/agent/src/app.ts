@@ -71,6 +71,12 @@ import { runDexExplorerQuery } from './explorer.js';
 import { runZoomeyeHostSearch, ZoomeyeQueryError } from './zoomeye.js';
 import { runShodanHostSearch, ShodanQueryError } from './shodan.js';
 import { getPassedShodanSearch, listPassedShodanSearches } from './shodan-searches.js';
+import { searchPayloadCatalog } from './payload-catalog.js';
+import {
+  IntruderAttackRequestSchema,
+  isIntruderInputError,
+  runIntruderAttack,
+} from './intruder.js';
 import {
   StartZapScanInputSchema,
   ZapScanStatusSchema,
@@ -1649,6 +1655,74 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
       return { ok: false, error: { code: 'not_found', message: 'No such Shodan passed search.' } };
     }
     return out;
+  });
+
+  app.get('/payloads', async (req) => {
+    const q = req.query as {
+      q?: unknown;
+      category?: unknown;
+      subcategory?: unknown;
+      sourceType?: unknown;
+      sourcePath?: unknown;
+      tag?: unknown;
+      limit?: unknown;
+      offset?: unknown;
+    } | null;
+
+    const sourceTypeRaw = q?.sourceType;
+    const sourceType =
+      sourceTypeRaw === 'intruder' || sourceTypeRaw === 'markdown' || sourceTypeRaw === 'file'
+        ? sourceTypeRaw
+        : undefined;
+
+    const limitRaw = q?.limit != null ? Number(q.limit) : 250;
+    const offsetRaw = q?.offset != null ? Number(q.offset) : 0;
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(1, Math.trunc(limitRaw)), 1000) : 250;
+    const offset = Number.isFinite(offsetRaw) ? Math.max(0, Math.trunc(offsetRaw)) : 0;
+
+    const payload = searchPayloadCatalog({
+      q: typeof q?.q === 'string' ? q.q : undefined,
+      category: typeof q?.category === 'string' ? q.category : undefined,
+      subcategory: typeof q?.subcategory === 'string' ? q.subcategory : undefined,
+      sourceType,
+      sourcePath: typeof q?.sourcePath === 'string' ? q.sourcePath : undefined,
+      tag: typeof q?.tag === 'string' ? q.tag : undefined,
+      limit,
+      offset,
+    });
+    return { ok: true as const, ...payload };
+  });
+
+  app.post('/intruder/attack', async (req, reply) => {
+    let body: ReturnType<typeof IntruderAttackRequestSchema.parse>;
+    try {
+      body = IntruderAttackRequestSchema.parse(req.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return {
+        ok: false,
+        error: { code: 'bad_request', message: err instanceof Error ? err.message : 'Bad body' },
+      };
+    }
+
+    try {
+      const payload = await runIntruderAttack(body);
+      return { ok: true as const, ...payload };
+    } catch (err) {
+      if (isIntruderInputError(err)) {
+        reply.code(400);
+        return {
+          ok: false,
+          error: { code: 'bad_request', message: err instanceof Error ? err.message : 'Invalid intruder request.' },
+        };
+      }
+
+      reply.code(500);
+      return {
+        ok: false,
+        error: { code: 'internal_error', message: err instanceof Error ? err.message : String(err) },
+      };
+    }
   });
 
   app.post('/ai/retrieve', async (_req, reply) => {

@@ -3,10 +3,8 @@
 import { AiChatResponseSchema, type AiAgentMode } from '@cipherscope/proto';
 import {
   AlertTriangle,
-  Briefcase,
   Copy,
   Hammer,
-  History,
   MessageSquare,
   Pause,
   Play,
@@ -26,7 +24,7 @@ import {
   type RunnerReferenceDetail,
 } from '@/lib/chat-references';
 
-type RunnerTabId = 'chat' | 'evidence' | 'risks' | 'flow' | 'tools';
+type RunnerTabId = 'chat' | 'risks' | 'tools';
 
 type ChatRole = 'user' | 'assistant';
 
@@ -105,9 +103,7 @@ const RUNNER_TABS: Array<{
   icon: ComponentType<{ className?: string }>;
 }> = [
   { id: 'chat', label: 'Agent Chat', icon: MessageSquare },
-  { id: 'evidence', label: 'Audit Evidence', icon: Briefcase },
   { id: 'risks', label: 'Security Risks', icon: AlertTriangle },
-  { id: 'flow', label: 'Auth Flow', icon: History },
   { id: 'tools', label: 'Tools', icon: Hammer },
 ];
 
@@ -1192,25 +1188,6 @@ export function RunnerPanel() {
             </div>
           ) : null}
 
-          {activeTab === 'evidence' ? (
-            <div className="space-y-3">
-              {messages.filter((item) => item.role === 'assistant').slice(-8).map((item) => (
-                <div
-                  key={`evidence_${item.id}`}
-                  className="rounded-lg border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] p-3"
-                >
-                  <div className="text-[12px] text-[color:var(--cs-muted)]">{formatTime(item.createdAt)}</div>
-                  <div className="mt-1 text-sm text-[color:var(--cs-fg)]">
-                    <ChatMarkdown content={item.content} className="text-[13px]" />
-                  </div>
-                </div>
-              ))}
-              {messages.filter((item) => item.role === 'assistant').length === 0 ? (
-                <div className="text-[12px] text-[color:var(--cs-muted)]">No agent evidence yet.</div>
-              ) : null}
-            </div>
-          ) : null}
-
           {activeTab === 'risks' ? (
             <div className="space-y-3">
               {inferredRisks.length === 0 ? (
@@ -1222,23 +1199,6 @@ export function RunnerPanel() {
                   <RiskItem key={`${risk.title}_${idx}`} severity={risk.severity} title={risk.title} />
                 ))
               )}
-            </div>
-          ) : null}
-
-          {activeTab === 'flow' ? (
-            <div className="space-y-3">
-              {messages.slice(-12).map((item) => (
-                <div key={`flow_${item.id}`} className="rounded-lg border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] p-3">
-                  <div className="text-[11px] uppercase text-[color:var(--cs-muted)]">{item.role}</div>
-                  <div className="mt-1 text-sm text-[color:var(--cs-fg)]">
-                    {item.role === 'assistant' ? (
-                      <ChatMarkdown content={item.content} className="text-[13px]" />
-                    ) : (
-                      <div className="break-words whitespace-pre-wrap">{item.content}</div>
-                    )}
-                  </div>
-                </div>
-              ))}
             </div>
           ) : null}
 
@@ -1279,7 +1239,6 @@ export function RunnerPanel() {
 
         <div className="flex-shrink-0 border-t border-[color:var(--cs-border)] px-2 py-2">
           <div className="mb-1.5 flex flex-wrap gap-1">
-            <ToolButton label={`Evidence ${messages.filter((item) => item.role === 'assistant').length}`} />
             <ToolButton label={`Tools ${toolCalls.length}`} />
             <ToolButton label={busy ? 'Running' : 'Idle'} />
           </div>

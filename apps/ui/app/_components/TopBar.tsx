@@ -207,20 +207,7 @@ export function TopBar() {
           ))}
         </select>
 
-        <input
-          type="text"
-          defaultValue="0x7d1afA7B718fb893db30A3aBc0Cfc608AaCfeBB0"
-          aria-label="Target contract address"
-          className="h-8 min-w-[320px] flex-1 rounded-lg border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] px-3 text-[13px] font-mono outline-none transition-colors focus:border-[color:var(--cs-accent)]"
-        />
 
-        <button
-          type="button"
-          className="inline-flex h-8 items-center gap-2 rounded-full bg-emerald-500/10 px-3 text-xs font-semibold text-emerald-600"
-        >
-          <Circle className="h-2 w-2 fill-current" />
-          In Audit
-        </button>
 
         <div className="relative hidden max-w-[420px] flex-1 items-center lg:flex">
           <GlobalSearch />
@@ -303,12 +290,6 @@ export function TopBar() {
 
         <SystemProxyToggle status={proxyStatus} loading={proxyStatus === null} onRefresh={refreshProxy} />
 
-        <Link
-          href="/report"
-          className="inline-flex h-8 items-center rounded-lg border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] px-3 text-[13px] text-[color:var(--cs-fg)]"
-        >
-          Report
-        </Link>
 
         <Link href="/settings" className={TOOL_ICON_CLASS} aria-label="Settings">
           <Settings className="h-3.5 w-3.5" />

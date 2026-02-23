@@ -12,6 +12,7 @@ import { useRouter } from 'next/navigation';
 import {
   Activity,
   CircleDot,
+  Crosshair,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -722,6 +723,13 @@ export function LeftNav() {
     [router],
   );
 
+  const openInIntruder = useCallback(
+    (messageId: string) => {
+      router.push(`/intruder?open=${encodeURIComponent(messageId)}`);
+    },
+    [router],
+  );
+
   const openInAnalyzer = useCallback(
     (messageId: string) => {
       router.push(`/audit?messageId=${encodeURIComponent(messageId)}`);
@@ -926,6 +934,9 @@ export function LeftNav() {
                           onSendToRepeater={
                             latestHostEventId ? () => openInRepeater(latestHostEventId) : undefined
                           }
+                          onSendToIntruder={
+                            latestHostEventId ? () => openInIntruder(latestHostEventId) : undefined
+                          }
                           onAnalyze={
                             latestHostEventId ? () => openInAnalyzer(latestHostEventId) : undefined
                           }
@@ -966,6 +977,7 @@ export function LeftNav() {
                               onHideEvent={hideEvent}
                               onHideFolder={hideFolder}
                               onOpenRepeater={openInRepeater}
+                              onOpenIntruder={openInIntruder}
                               onAnalyzeEvent={openInAnalyzer}
                               onDeleteManyEvents={deleteManyEvents}
                               getFolderEventIdsForDelete={getFolderEventIdsForDelete}
@@ -1075,6 +1087,7 @@ export function LeftNav() {
                   }
                   onHideEvent={hideEvent}
                   onOpenRepeater={openInRepeater}
+                  onOpenIntruder={openInIntruder}
                   onAnalyzeEvent={openInAnalyzer}
                 />
               ))}
@@ -1165,6 +1178,7 @@ function SiteRow(props: {
   onHide?: () => void;
   onDelete?: () => void;
   onSendToRepeater?: () => void;
+  onSendToIntruder?: () => void;
   onAnalyze?: () => void;
 }) {
   const button = (
@@ -1205,6 +1219,10 @@ function SiteRow(props: {
           <ContextMenuItem onClick={props.onSendToRepeater} disabled={!props.onSendToRepeater}>
             <RotateCcw className="h-3.5 w-3.5" />
             Send Latest to Repeater
+          </ContextMenuItem>
+          <ContextMenuItem onClick={props.onSendToIntruder} disabled={!props.onSendToIntruder}>
+            <Crosshair className="h-3.5 w-3.5" />
+            Send Latest to Intruder
           </ContextMenuItem>
           <ContextMenuItem onClick={props.onAnalyze} disabled={!props.onAnalyze}>
             <Search className="h-3.5 w-3.5" />
@@ -1271,6 +1289,7 @@ function HostPathTree({
   onHideEvent,
   onHideFolder,
   onOpenRepeater,
+  onOpenIntruder,
   onAnalyzeEvent,
   onDeleteManyEvents,
   getFolderEventIdsForDelete,
@@ -1292,6 +1311,7 @@ function HostPathTree({
   onHideEvent: (eventId: string) => void;
   onHideFolder: (folderKey: string) => void;
   onOpenRepeater: (eventId: string) => void;
+  onOpenIntruder: (eventId: string) => void;
   onAnalyzeEvent: (eventId: string) => void;
   onDeleteManyEvents: (eventIds: string[]) => Promise<void>;
   getFolderEventIdsForDelete: (host: string, port: number, path: string) => string[];
@@ -1334,6 +1354,7 @@ function HostPathTree({
           onHideEvent={onHideEvent}
           onHideFolder={onHideFolder}
           onOpenRepeater={onOpenRepeater}
+          onOpenIntruder={onOpenIntruder}
           onAnalyzeEvent={onAnalyzeEvent}
           onDeleteManyEvents={onDeleteManyEvents}
           getFolderEventIdsForDelete={getFolderEventIdsForDelete}
@@ -1372,6 +1393,7 @@ function PathTreeNodes({
   onHideEvent,
   onHideFolder,
   onOpenRepeater,
+  onOpenIntruder,
   onAnalyzeEvent,
   onDeleteManyEvents,
   getFolderEventIdsForDelete,
@@ -1395,6 +1417,7 @@ function PathTreeNodes({
   onHideEvent: (eventId: string) => void;
   onHideFolder: (folderKey: string) => void;
   onOpenRepeater: (eventId: string) => void;
+  onOpenIntruder: (eventId: string) => void;
   onAnalyzeEvent: (eventId: string) => void;
   onDeleteManyEvents: (eventIds: string[]) => Promise<void>;
   getFolderEventIdsForDelete: (host: string, port: number, path: string) => string[];
@@ -1436,6 +1459,7 @@ function PathTreeNodes({
         onNickname={() => onNicknameFolder(folderKey, label)}
         onHide={() => onHideFolder(folderKey)}
         onSendToRepeater={latestFolderEventId ? () => onOpenRepeater(latestFolderEventId) : undefined}
+        onSendToIntruder={latestFolderEventId ? () => onOpenIntruder(latestFolderEventId) : undefined}
         onAnalyze={latestFolderEventId ? () => onAnalyzeEvent(latestFolderEventId) : undefined}
         onDelete={
           folderStats.count > 0 ?
@@ -1460,6 +1484,7 @@ function PathTreeNodes({
               onNicknameEvent={onNicknameEvent}
               onHideEvent={onHideEvent}
               onOpenRepeater={onOpenRepeater}
+              onOpenIntruder={onOpenIntruder}
               onAnalyzeEvent={onAnalyzeEvent}
             />
           ))
@@ -1487,6 +1512,7 @@ function PathTreeNodes({
               onHideEvent={onHideEvent}
               onHideFolder={onHideFolder}
               onOpenRepeater={onOpenRepeater}
+              onOpenIntruder={onOpenIntruder}
               onAnalyzeEvent={onAnalyzeEvent}
               onDeleteManyEvents={onDeleteManyEvents}
               getFolderEventIdsForDelete={getFolderEventIdsForDelete}
@@ -1510,6 +1536,7 @@ function TreeRow(props: {
   onHide?: () => void;
   onDelete?: () => void;
   onSendToRepeater?: () => void;
+  onSendToIntruder?: () => void;
   onAnalyze?: () => void;
 }) {
   const { isExpandable = false, isOpen = false, onToggle } = props;
@@ -1565,7 +1592,12 @@ function TreeRow(props: {
     : <div className={className} style={style}>{content}</div>;
 
   const withContextMenu =
-    props.onNickname || props.onHide || props.onDelete || props.onSendToRepeater || props.onAnalyze;
+    props.onNickname ||
+    props.onHide ||
+    props.onDelete ||
+    props.onSendToRepeater ||
+    props.onSendToIntruder ||
+    props.onAnalyze;
 
   return (
     <>
@@ -1580,6 +1612,10 @@ function TreeRow(props: {
             <ContextMenuItem onClick={props.onSendToRepeater} disabled={!props.onSendToRepeater}>
               <RotateCcw className="h-3.5 w-3.5" />
               Send Latest to Repeater
+            </ContextMenuItem>
+            <ContextMenuItem onClick={props.onSendToIntruder} disabled={!props.onSendToIntruder}>
+              <Crosshair className="h-3.5 w-3.5" />
+              Send Latest to Intruder
             </ContextMenuItem>
             <ContextMenuItem onClick={props.onAnalyze} disabled={!props.onAnalyze}>
               <Search className="h-3.5 w-3.5" />
@@ -1684,6 +1720,7 @@ function EventRow(props: {
   onNicknameEvent: (eventId: string, label: string) => void;
   onHideEvent: (eventId: string) => void;
   onOpenRepeater: (eventId: string) => void;
+  onOpenIntruder: (eventId: string) => void;
   onAnalyzeEvent: (eventId: string) => void;
 }) {
   const event = props.event;
@@ -1720,6 +1757,10 @@ function EventRow(props: {
         <ContextMenuItem onClick={() => props.onOpenRepeater(event.id)}>
           <RotateCcw className="h-3.5 w-3.5" />
           Send to Repeater
+        </ContextMenuItem>
+        <ContextMenuItem onClick={() => props.onOpenIntruder(event.id)}>
+          <Crosshair className="h-3.5 w-3.5" />
+          Send to Intruder
         </ContextMenuItem>
         <ContextMenuItem onClick={() => props.onAnalyzeEvent(event.id)}>
           <Search className="h-3.5 w-3.5" />

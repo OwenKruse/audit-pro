@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useFoundrySettings, type FoundrySettings } from '@/lib/foundry-store';
 
 type InlineStatus = { ok: boolean; message: string };
 
@@ -55,6 +56,8 @@ type ChainPreset = {
   label: string;
   chainId: number;
   rpcUrl: string;
+  currencySymbol: string;
+  blockExplorerUrl: string;
 };
 
 const inputClass =
@@ -64,17 +67,69 @@ const btnClass =
 const chainSelectClass = inputClass;
 
 const CHAIN_PRESETS: ChainPreset[] = [
-  { id: 'eth', label: 'Ethereum Mainnet', chainId: 1, rpcUrl: 'https://ethereum-rpc.publicnode.com' },
-  { id: 'arbitrum', label: 'Arbitrum One', chainId: 42161, rpcUrl: 'https://arb1.arbitrum.io/rpc' },
-  { id: 'base', label: 'Base', chainId: 8453, rpcUrl: 'https://mainnet.base.org' },
-  { id: 'optimism', label: 'Optimism', chainId: 10, rpcUrl: 'https://mainnet.optimism.io' },
-  { id: 'polygon', label: 'Polygon PoS', chainId: 137, rpcUrl: 'https://polygon-rpc.com' },
-  { id: 'bsc', label: 'BNB Smart Chain', chainId: 56, rpcUrl: 'https://bsc-dataseed.binance.org' },
+  {
+    id: 'anvil',
+    label: 'Anvil / Foundry Default',
+    chainId: 31337,
+    rpcUrl: 'http://127.0.0.1:8545',
+    currencySymbol: 'ETH',
+    blockExplorerUrl: '',
+  },
+  {
+    id: 'eth',
+    label: 'Ethereum Mainnet',
+    chainId: 1,
+    rpcUrl: 'https://ethereum-rpc.publicnode.com',
+    currencySymbol: 'ETH',
+    blockExplorerUrl: 'https://etherscan.io',
+  },
+  {
+    id: 'arbitrum',
+    label: 'Arbitrum One',
+    chainId: 42161,
+    rpcUrl: 'https://arb1.arbitrum.io/rpc',
+    currencySymbol: 'ETH',
+    blockExplorerUrl: 'https://arbiscan.io',
+  },
+  {
+    id: 'base',
+    label: 'Base',
+    chainId: 8453,
+    rpcUrl: 'https://mainnet.base.org',
+    currencySymbol: 'ETH',
+    blockExplorerUrl: 'https://basescan.org',
+  },
+  {
+    id: 'optimism',
+    label: 'Optimism',
+    chainId: 10,
+    rpcUrl: 'https://mainnet.optimism.io',
+    currencySymbol: 'ETH',
+    blockExplorerUrl: 'https://optimistic.etherscan.io',
+  },
+  {
+    id: 'polygon',
+    label: 'Polygon PoS',
+    chainId: 137,
+    rpcUrl: 'https://polygon-rpc.com',
+    currencySymbol: 'MATIC',
+    blockExplorerUrl: 'https://polygonscan.com',
+  },
+  {
+    id: 'bsc',
+    label: 'BNB Smart Chain',
+    chainId: 56,
+    rpcUrl: 'https://bsc-dataseed.binance.org',
+    currencySymbol: 'BNB',
+    blockExplorerUrl: 'https://bscscan.com',
+  },
   {
     id: 'avalanche',
     label: 'Avalanche C-Chain',
     chainId: 43114,
     rpcUrl: 'https://api.avax.network/ext/bc/C/rpc',
+    currencySymbol: 'AVAX',
+    blockExplorerUrl: 'https://snowtrace.io',
   },
 ];
 
@@ -118,7 +173,24 @@ function inferPresetId(input: { chainId: number | null; forkUrl: string | null }
   return byChainId.id;
 }
 
+function syncedRuntimeSettings(current: FoundrySettings, payload: AgentConfigOk): FoundrySettings {
+  const chainId =
+    Number.isInteger(payload.foundry.chainId) && payload.foundry.chainId > 0
+      ? payload.foundry.chainId
+      : current.chainId;
+  const preset = findPresetByChainId(chainId);
+  return {
+    ...current,
+    rpcUrl: payload.foundry.rpcUrl || current.rpcUrl,
+    chainId,
+    chainName: preset?.label ?? (current.chainId === chainId ? current.chainName : `Chain ${chainId}`),
+    currencySymbol: preset?.currencySymbol ?? current.currencySymbol,
+    blockExplorerUrl: preset?.blockExplorerUrl ?? current.blockExplorerUrl,
+  };
+}
+
 export function AnvilForkSettingsCard() {
+  const { settings: runtimeSettings, setSettings: setRuntimeSettings } = useFoundrySettings();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [showForkUrl, setShowForkUrl] = useState(false);
@@ -149,7 +221,24 @@ export function AnvilForkSettingsCard() {
   const selectedPreset = useMemo(() => findPresetById(selectedChainPresetId), [selectedChainPresetId]);
   const usingCustomPreset = selectedChainPresetId === CUSTOM_CHAIN_PRESET_ID;
 
-  async function refresh() {
+  const syncRuntimeFromAgent = useCallback(
+    (payload: AgentConfigOk) => {
+      const next = syncedRuntimeSettings(runtimeSettings, payload);
+      if (
+        next.rpcUrl === runtimeSettings.rpcUrl &&
+        next.chainId === runtimeSettings.chainId &&
+        next.chainName === runtimeSettings.chainName &&
+        next.currencySymbol === runtimeSettings.currencySymbol &&
+        next.blockExplorerUrl === runtimeSettings.blockExplorerUrl
+      ) {
+        return;
+      }
+      setRuntimeSettings(next);
+    },
+    [runtimeSettings, setRuntimeSettings],
+  );
+
+  const refresh = useCallback(async () => {
     setLoading(true);
     setStatus(null);
     try {
@@ -178,6 +267,7 @@ export function AnvilForkSettingsCard() {
       setForkUrlDraft(baseForkUrl ?? preset?.rpcUrl ?? findPresetById(DEFAULT_CHAIN_PRESET_ID)?.rpcUrl ?? '');
       setPinBlock(!!baseForkUrl && baseForkBlock != null);
       setForkBlockDraft(baseForkBlock != null ? String(baseForkBlock) : '');
+      syncRuntimeFromAgent(json);
     } catch (err) {
       setData(null);
       setStatus({
@@ -187,11 +277,11 @@ export function AnvilForkSettingsCard() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [syncRuntimeFromAgent]);
 
   useEffect(() => {
     void refresh();
-  }, []);
+  }, [refresh]);
 
   async function onSave(e: FormEvent) {
     e.preventDefault();
@@ -283,6 +373,9 @@ export function AnvilForkSettingsCard() {
         <p className="text-[11px] text-[color:var(--cs-muted)]">
           Configure the agent-managed Anvil to fork a remote chain. Leave block number blank to fork the latest block
           whenever the agent starts.
+        </p>
+        <p className="text-[11px] text-[color:var(--cs-muted)]">
+          Chain/RPC choices here automatically sync the Foundry Runtime card and wallet switch target.
         </p>
 
         {loading ? (

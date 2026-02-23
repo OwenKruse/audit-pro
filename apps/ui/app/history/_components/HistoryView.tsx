@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { EyeOff, FileWarning, MessageCircle, Repeat, Trash2 } from 'lucide-react';
+import { Crosshair, EyeOff, FileWarning, MessageCircle, Repeat, Trash2 } from 'lucide-react';
 import { dispatchRunnerReference } from '@/lib/chat-references';
 import { Button } from '@/components/ui/button';
 import {
@@ -687,6 +687,17 @@ function MessageInspector({ id }: { id: string }) {
               </Link>
             </TooltipTrigger>
             <TooltipContent>Open in Repeater</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Link
+                href={`/intruder?open=${encodeURIComponent(data.id)}`}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-[color:var(--cs-muted)] hover:bg-[color:var(--cs-panel)] hover:text-[color:var(--cs-fg)]"
+              >
+                <Crosshair className="h-4 w-4" />
+              </Link>
+            </TooltipTrigger>
+            <TooltipContent>Send to Intruder</TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>

@@ -878,6 +878,118 @@ describe('agent /ai/chat', () => {
     upstream.close();
   });
 
+  it('fetches webpage markdown using the get_webpage_markdown tool', async () => {
+    process.env.OPENAI_API_KEY = 'test-openai-key';
+    process.env.OPENAI_MODEL = 'gpt-4.1-mini';
+
+    const targetUrl = 'https://example.com/docs?a=1';
+    let aiCallCount = 0;
+    let seenReaderUrl = '';
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(typeof input === 'string' || input instanceof URL ? input : input.url);
+      if (url.startsWith('https://r.jina.ai/')) {
+        seenReaderUrl = url;
+        return new Response(
+          [
+            'Title: Example Domain',
+            '',
+            `URL Source: ${targetUrl}`,
+            '',
+            'Markdown Content:',
+            '# Example Docs',
+            '',
+            'Hello from markdown.',
+          ].join('\n'),
+          { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' } },
+        );
+      }
+
+      if (!url.includes('/chat/completions')) throw new Error('fetch failed');
+
+      aiCallCount += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        messages?: Array<{ role?: string; content?: string }>;
+      };
+
+      if (aiCallCount === 1) {
+        return new Response(
+          JSON.stringify({
+            model: 'gpt-4.1-mini',
+            choices: [
+              {
+                message: {
+                  role: 'assistant',
+                  content: '',
+                  tool_calls: [
+                    {
+                      id: 'call_web_md',
+                      type: 'function',
+                      function: {
+                        name: 'get_webpage_markdown',
+                        arguments: JSON.stringify({ url: targetUrl }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+
+      const toolMessage = findLastToolMessage(body.messages);
+      const toolPayload = JSON.parse(String(toolMessage?.content ?? '{}')) as {
+        title?: string;
+        sourceUrl?: string;
+        markdown?: string;
+        truncated?: boolean;
+      };
+      expect(toolPayload.title).toBe('Example Domain');
+      expect(toolPayload.sourceUrl).toBe(targetUrl);
+      expect(String(toolPayload.markdown ?? '')).toContain('# Example Docs');
+      expect(toolPayload.truncated).toBe(false);
+
+      return new Response(
+        JSON.stringify({
+          model: 'gpt-4.1-mini',
+          choices: [{ message: { role: 'assistant', content: 'Summary\n- Web markdown fetched.' } }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cipherscope-agent-ai-'));
+    const dbPath = path.join(tmpDir, 'agent.db');
+    const { app, close } = await buildApp({
+      dbPath,
+      agentName: 'cipherscope-agent',
+      agentVersion: '0.0.0-test',
+      proxyHost: '127.0.0.1',
+      proxyPort: 0,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/ai/chat',
+      payload: {
+        mode: 'smart_contract_audit',
+        maxSteps: 3,
+        messages: [{ role: 'user', content: 'Fetch markdown for https://example.com/docs?a=1' }],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const json = res.json();
+    expect(json.ok).toBe(true);
+    expect(json.toolCalls[0].name).toBe('get_webpage_markdown');
+    expect(json.toolCalls[0].ok).toBe(true);
+    expect(seenReaderUrl).toContain('https://r.jina.ai/');
+    expect(seenReaderUrl).toContain(encodeURIComponent(targetUrl));
+
+    await close();
+  });
+
   it('persists repeater session state across separate chat requests', async () => {
     process.env.OPENAI_API_KEY = 'test-openai-key';
     process.env.OPENAI_MODEL = 'gpt-4.1-mini';

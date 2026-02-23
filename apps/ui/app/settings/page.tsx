@@ -4,6 +4,7 @@ import { FoundrySettingsCard } from './_components/FoundrySettingsCard';
 import { ProxySettingsCard } from './_components/ProxySettingsCard';
 import { AiSettingsCard } from './_components/AiSettingsCard';
 import { ZapSettingsCard } from './_components/ZapSettingsCard';
+import { SeedPhraseCard } from './_components/SeedPhraseCard';
 
 export default function SettingsPage() {
   return (
@@ -14,10 +15,11 @@ export default function SettingsPage() {
 
       <div className="flex flex-col gap-0 max-h-[90vh] overflow-y-auto">
         <CaseFilesCard />
-        <FoundrySettingsCard />
         <AnvilForkSettingsCard />
+        <FoundrySettingsCard />
         <ProxySettingsCard />
         <ZapSettingsCard />
+        <SeedPhraseCard />
         <AiSettingsCard />
 
         <div className="border-b border-[color:var(--cs-border)]">

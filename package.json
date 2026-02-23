@@ -4,12 +4,14 @@
   "packageManager": "pnpm@10.27.0",
   "scripts": {
     "dev": "NODE_OPTIONS='--use-system-ca' pnpm --filter @cipherscope/proto build && pnpm --filter @cipherscope/sdk build && concurrently -k -n agent,ui -c green,blue \"pnpm --filter @cipherscope/agent dev\" \"pnpm --filter @cipherscope/ui dev\"",
+    "dev:https": "NODE_OPTIONS='--use-system-ca' pnpm --filter @cipherscope/proto build && pnpm --filter @cipherscope/sdk build && concurrently -k -n agent,ui -c green,blue \"pnpm --filter @cipherscope/agent dev\" \"pnpm --filter @cipherscope/ui dev:https\"",
     "start": "node ./scripts/start.mjs",
     "build": "pnpm --filter @cipherscope/proto build && pnpm --filter @cipherscope/sdk build && pnpm --filter @cipherscope/ui build",
     "test": "pnpm --filter @cipherscope/proto build && pnpm --filter @cipherscope/sdk build && pnpm -r --if-present test",
     "lint": "pnpm -r --if-present lint",
     "typecheck": "pnpm --filter @cipherscope/proto build && pnpm --filter @cipherscope/sdk build && pnpm -r --if-present typecheck",
-    "format": "prettier -w ."
+    "format": "prettier -w .",
+    "payloads:sync": "node scripts/sync-payloads-all-the-things.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",

@@ -34,6 +34,8 @@ import { getRpcInteraction, listRpcInteractions } from './rpc-history.js';
 import { getZapScan, listZapScans, startZapScan, stopZapScan } from './zap-scans.js';
 import { runSubfinder } from './subfinder.js';
 import { recordPassedShodanSearch } from './shodan-searches.js';
+import { searchPayloadCatalog } from './payload-catalog.js';
+import { IntruderAttackRequestSchema, runIntruderAttack } from './intruder.js';
 
 type ToolCall = {
   id: string;
@@ -277,6 +279,24 @@ const SearchShodanHostsArgsSchema = z.object({
   pageSize: z.number().int().min(1).max(100).optional(),
   facets: ExplorerListArgSchema.optional(),
   minify: z.boolean().optional(),
+});
+
+const GetWebPageMarkdownArgsSchema = z.object({
+  url: z.string().trim().min(1).max(4096),
+  timeoutMs: z.number().int().min(1000).max(60_000).optional(),
+  maxChars: z.number().int().min(500).max(200_000).optional(),
+  noCache: z.boolean().optional(),
+});
+
+const SearchPayloadsArgsSchema = z.object({
+  q: z.string().trim().max(500).optional(),
+  category: z.string().trim().max(200).optional(),
+  subcategory: z.string().trim().max(200).optional(),
+  sourceType: z.enum(['intruder', 'markdown', 'file']).optional(),
+  sourcePath: z.string().trim().max(600).optional(),
+  tag: z.string().trim().max(120).optional(),
+  limit: z.number().int().min(1).max(1000).optional(),
+  offset: z.number().int().min(0).max(100_000).optional(),
 });
 
 const GetExplorerProjectDetailsArgsSchema = z.object({
@@ -765,6 +785,88 @@ const OPENAI_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'search_payloads',
+      description:
+        'Search and filter PayloadsAllTheThings payload catalog by query/category/source for attack payload selection.',
+      parameters: {
+        type: 'object',
+        properties: {
+          q: { type: 'string' },
+          category: { type: 'string' },
+          subcategory: { type: 'string' },
+          sourceType: { type: 'string', enum: ['intruder', 'markdown', 'file'] },
+          sourcePath: { type: 'string' },
+          tag: { type: 'string' },
+          limit: { type: 'integer', minimum: 1, maximum: 1000 },
+          offset: { type: 'integer', minimum: 0 },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_intruder_attack',
+      description:
+        'Run a Burp-style intruder attack against an HTTP request template using §...§ payload positions.',
+      parameters: {
+        type: 'object',
+        properties: {
+          method: { type: 'string' },
+          url: { type: 'string' },
+          headers: {
+            oneOf: [
+              { type: 'string' },
+              { type: 'array', items: { type: 'string' }, maxItems: 256 },
+              {
+                type: 'object',
+                additionalProperties: {
+                  oneOf: [
+                    { type: 'string' },
+                    { type: 'array', items: { type: 'string' }, maxItems: 64 },
+                  ],
+                },
+              },
+            ],
+          },
+          body: { type: 'string' },
+          attackType: { type: 'string', enum: ['sniper', 'battering_ram', 'pitchfork', 'cluster_bomb'] },
+          payloadSets: {
+            type: 'array',
+            maxItems: 20,
+            items: { type: 'array', items: { type: 'string' }, maxItems: 20000 },
+          },
+          payloadSetQueries: {
+            type: 'array',
+            maxItems: 20,
+            items: {
+              type: 'object',
+              properties: {
+                q: { type: 'string' },
+                category: { type: 'string' },
+                subcategory: { type: 'string' },
+                sourceType: { type: 'string', enum: ['intruder', 'markdown', 'file'] },
+                sourcePath: { type: 'string' },
+                tag: { type: 'string' },
+                limit: { type: 'integer', minimum: 1, maximum: 3000 },
+              },
+              additionalProperties: false,
+            },
+          },
+          maxRequests: { type: 'integer', minimum: 1, maximum: 10000 },
+          concurrency: { type: 'integer', minimum: 1, maximum: 20 },
+          timeoutMs: { type: 'integer', minimum: 100, maximum: 60000 },
+          delayMs: { type: 'integer', minimum: 0, maximum: 5000 },
+        },
+        required: ['method', 'url'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'explore_dex_protocols',
       description:
         'Query the DEX explorer screener (DeFiLlama-backed) with filters, sorting, and optional fees/revenue enrichment.',
@@ -864,6 +966,25 @@ const OPENAI_TOOLS = [
           minify: { type: 'boolean' },
         },
         required: ['q'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_webpage_markdown',
+      description:
+        'Fetch AI-readable markdown for a public web page via r.jina.ai. Use this for docs/blog/reference pages when plain markdown content is needed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          timeoutMs: { type: 'integer', minimum: 1000, maximum: 60000 },
+          maxChars: { type: 'integer', minimum: 500, maximum: 200000 },
+          noCache: { type: 'boolean' },
+        },
+        required: ['url'],
         additionalProperties: false,
       },
     },
@@ -2503,38 +2624,44 @@ function buildPayloadCandidates(input: {
   return out.slice(0, input.maxCases);
 }
 
-function modeInstruction(mode: AiChatRequest['mode']): string {
-  switch (mode) {
-    case 'static_analysis':
-      return 'Prioritize ABI/call-structure inspection and deterministic reasoning over execution-heavy tooling.';
-    case 'symbolic_execution':
-      return 'Prioritize path exploration ideas, constraints, and edge-case payload design before broad scanning.';
-    case 'fuzzing_campaign':
-      return 'Prioritize mutation planning, fuzz target selection, and campaign/anomaly interpretation.';
-    default:
-      return 'Prioritize actionable smart-contract security findings backed by captured evidence and tool outputs.';
-  }
-}
+const SYSTEM_PROMPT = `You are CipherScope Autonomous Agent running in a local crypto security workbench. Your primary directive is to be exhaustive, tenacious, and highly detailed in your investigations. Never take the shortest path to completion; always thoroughly enumerate and verify your findings.
 
-function buildSystemPrompt(mode: AiChatRequest['mode']): string {
-  return [
-    'You are CipherScope Autonomous Agent running in a local crypto security workbench.',
-    'Use tools to gather evidence before making factual claims.',
-    'Use get_explorer_project_details, discover_protocol_addresses, and get_contract_metadata for protocol/contract metadata lookups.',
-    'Use search_zoomeye_hosts or search_shodan_hosts for external host discovery when reconnaissance or exposed-service lookups are requested.',
-    'For search_zoomeye_hosts, q must be ZoomEye DSL (field="value" with optional &&/||), never a natural-language sentence.',
-    'If search_zoomeye_hosts returns "Invalid query", rewrite q into ZoomEye DSL and retry once with a simpler expression.',
-    'For search_shodan_hosts, q should use Shodan query syntax with filters (e.g. apache country:US or product:nginx port:443).',
-    'Use manage_foundry_environment to control chain/fork config and basic Foundry/anvil EVM state operations.',
-    'Use repeater_request for stateful HTTP exploration (set once, send many) and http_request for one-off curl-like checks.',
-    'For http_request/repeater_request, pass headers via a headers object or curl-style header lines (example: ["Authorization: Bearer <token>"]).',
-    'When asked for payload generation, provide concrete replay overrides and explain expected outcomes.',
-    'When risk is identified, include severity, impact, evidence IDs, and next verification steps.',
-    'Do not stop at recommendations: if you write anything in Next Actions and it can be executed with available tools, execute it in this same run before answering.',
-    'Only leave items in Next Actions that require user input/approval or access you do not have.',
-    'Keep responses concise and structured with these sections: Summary, Evidence, Next Actions.',
-    modeInstruction(mode),
-  ].join('\n');
+### 1. Planning & Methodology (MANDATORY)
+Before executing any tools or answering vague requests (e.g., "Investigate [target]"), you must generate a step-by-step execution plan using a \`<scratchpad>\` block.
+- Your plan must break the task into distinct, logical phases (e.g., Broad Recon, Service Enumeration, Deep Probing).
+- You must not conclude your response until every actionable step in your plan has been executed or definitively blocked by access constraints.
+
+### 2. Standard Operating Procedures (SOPs)
+If instructed to "investigate" or "analyze" a target without specific parameters, you must execute an exhaustive enumeration:
+1. Query Shodan AND ZoomEye for the target to establish a broad footprint.
+2. Enumerate all discovered open ports and technologies.
+3. For HTTP/HTTPS ports, use \`http_request\` to fetch the index page and headers.
+4. For discovered web apps or docs, use \`get_webpage_markdown\` to read them and extract context.
+5. Cross-reference any discovered smart contracts using your protocol/contract lookup tools.
+
+### 3. Tool Usage Rules
+- Gather concrete evidence using tools before making factual claims.
+- **Crypto/Protocol Lookups:** Use \`get_explorer_project_details\`, \`discover_protocol_addresses\`, and \`get_contract_metadata\`.
+- **Reconnaissance:** Use \`search_zoomeye_hosts\` or \`search_shodan_hosts\` for external host discovery/exposed services.
+    - \`search_zoomeye_hosts\`: \`q\` must be ZoomEye DSL (field="value" with optional &&/||), never a natural-language sentence. If it returns "Invalid query", rewrite \`q\` into ZoomEye DSL and retry once with a simpler expression.
+    - \`search_shodan_hosts\`: \`q\` must use Shodan query syntax with filters (e.g., \`apache country:US\` or \`product:nginx port:443\`).
+- **Web Content:** Use \`get_webpage_markdown\` for web docs/blogs/references to get clean markdown content for reasoning.
+- **EVM State:** Use \`manage_foundry_environment\` to control chain/fork config and basic Foundry/anvil operations.
+- **HTTP/Web Probing:** Use \`repeater_request\` for stateful HTTP exploration (set once, send many) and \`http_request\` for one-off curl-like checks. Pass headers via a headers object or curl-style header lines (example: \`["Authorization: Bearer <token>"]\`).
+
+### 4. Execution vs. Recommendations
+- When asked for payload generation, provide concrete replay overrides and explain expected outcomes.
+- **Do not stop at recommendations:** If you write anything in "Next Actions" that can be executed with your available tools, YOU MUST EXECUTE IT in this same run before answering.
+- Only leave items in "Next Actions" that require user input, manual approval, or access privileges you do not possess.
+
+### 5. Final Reporting
+Your internal reasoning and tool execution loop should be highly verbose and multi-stepped. However, your final user-facing response must be concise, structured, and strictly contain only these sections:
+- **Summary:** High-level findings and overall posture.
+- **Evidence:** Detail any risks identified (must include severity, impact, evidence IDs, and verification steps taken).
+- **Next Actions:** Only manual steps, required approvals, or unavailable tool requests.`;
+
+function buildSystemPrompt(_mode: AiChatRequest['mode']): string {
+  return SYSTEM_PROMPT;
 }
 
 class AiRequestError extends Error {
@@ -3163,6 +3290,72 @@ async function executeTool(
         summary: `Generated ${candidates.length} payload candidates from ${parsed.messageId}.`,
       };
     }
+    case 'search_payloads': {
+      const parsed = SearchPayloadsArgsSchema.parse(args);
+      const out = searchPayloadCatalog({
+        q: parsed.q,
+        category: parsed.category,
+        subcategory: parsed.subcategory,
+        sourceType: parsed.sourceType,
+        sourcePath: parsed.sourcePath,
+        tag: parsed.tag,
+        limit: parsed.limit ?? 200,
+        offset: parsed.offset ?? 0,
+      });
+      return {
+        payload: {
+          source: out.source,
+          total: out.total,
+          count: out.count,
+          limit: out.limit,
+          offset: out.offset,
+          categories: out.categories,
+          subcategories: out.subcategories,
+          sourceTypes: out.sourceTypes,
+          tags: out.tags,
+          items: out.items.map((item) => ({
+            id: item.id,
+            value: truncate(item.value, 800),
+            category: item.category,
+            subcategory: item.subcategory,
+            sourcePath: item.sourcePath,
+            sourceType: item.sourceType,
+            tags: item.tags,
+          })),
+        },
+        summary: `Loaded ${out.count} payloads (total ${out.total}) from PayloadsAllTheThings catalog.`,
+      };
+    }
+    case 'run_intruder_attack': {
+      const parsed = IntruderAttackRequestSchema.parse(args);
+      const out = await runIntruderAttack(parsed);
+      const statusCounts: Record<string, number> = {};
+      let errorCount = 0;
+      for (const row of out.results) {
+        const key = row.status == null ? 'null' : String(row.status);
+        statusCounts[key] = (statusCounts[key] ?? 0) + 1;
+        if (row.error) errorCount += 1;
+      }
+      return {
+        payload: {
+          attackType: out.attackType,
+          startedAt: out.startedAt,
+          finishedAt: out.finishedAt,
+          durationMs: out.durationMs,
+          positions: out.positions,
+          requestCount: out.requestCount,
+          capped: out.capped,
+          maxRequests: out.maxRequests,
+          stats: {
+            statusCounts,
+            errorCount,
+          },
+          results: out.results.slice(0, 120),
+          omittedResults: Math.max(0, out.results.length - 120),
+        },
+        summary: `Intruder attack executed ${out.requestCount} requests (${errorCount} errors).`,
+      };
+    }
     case 'explore_dex_protocols': {
       if (!ctx.invokeLocal) throw new Error('DEX explorer unavailable: local invoke bridge not configured.');
       const parsed = ExploreDexProtocolsArgsSchema.parse(args);
@@ -3329,6 +3522,68 @@ async function executeTool(
           items: rows,
         },
         summary,
+      };
+    }
+    case 'get_webpage_markdown': {
+      const parsed = GetWebPageMarkdownArgsSchema.parse(args);
+      const fetchImpl = ctx.fetchImpl ?? fetch;
+      const timeoutMs = parsed.timeoutMs ?? 15_000;
+      const maxChars = parsed.maxChars ?? 16_000;
+      const noCache = parsed.noCache ?? false;
+
+      let target: URL;
+      try {
+        target = new URL(parsed.url);
+      } catch (err) {
+        throw new Error(`get_webpage_markdown invalid url: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+        throw new Error('get_webpage_markdown requires an http or https url.');
+      }
+      target.hash = '';
+      const normalizedUrl = target.toString();
+      const readerUrl = `https://r.jina.ai/${encodeURIComponent(normalizedUrl)}`;
+
+      const res = await fetchWithTimeout(
+        fetchImpl,
+        readerUrl,
+        {
+          method: 'GET',
+          headers: {
+            accept: 'text/plain, text/markdown;q=0.9, */*;q=0.1',
+            ...(noCache ? { 'x-no-cache': 'true' } : {}),
+          },
+          redirect: 'follow',
+        },
+        timeoutMs,
+      );
+      const content = await res.text().catch(() => '');
+      if (!res.ok) {
+        throw new Error(
+          `get_webpage_markdown failed (${res.status} ${res.statusText}): ${truncate(content, 500)}`,
+        );
+      }
+
+      const text = content.trim();
+      const titleMatch = text.match(/(?:^|\n)Title:\s*(.+)\s*(?:\n|$)/);
+      const sourceMatch = text.match(/(?:^|\n)URL Source:\s*(.+)\s*(?:\n|$)/);
+      const markdownMarker = 'Markdown Content:';
+      const markdownStart = text.indexOf(markdownMarker);
+      const markdown = markdownStart >= 0 ? text.slice(markdownStart + markdownMarker.length).trimStart() : text;
+      const markdownOut = truncate(markdown, maxChars);
+      const truncated = markdownOut.length < markdown.length;
+
+      return {
+        payload: {
+          requestedUrl: normalizedUrl,
+          readerUrl,
+          sourceUrl: sourceMatch?.[1]?.trim() || normalizedUrl,
+          title: titleMatch?.[1]?.trim() || null,
+          markdown: markdownOut,
+          markdownChars: markdown.length,
+          truncated,
+        },
+        summary: `Fetched markdown for ${target.host}${target.pathname} (${markdownOut.length} chars${truncated ? ', truncated' : ''}).`,
       };
     }
     case 'discover_protocol_addresses': {

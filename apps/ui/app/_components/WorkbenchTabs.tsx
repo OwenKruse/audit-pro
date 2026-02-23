@@ -13,6 +13,8 @@ const WORKBENCH_TABS: Array<{ href: string; label: string }> = [
   { href: '/audit', label: 'Security Audit' },
   { href: '/gas', label: 'Gas Profiler' },
   { href: '/fuzzer', label: 'Fuzzer' },
+  { href: '/payloads', label: 'Payloads' },
+  { href: '/intruder', label: 'Intruder' },
 ];
 
 export function WorkbenchTabs() {

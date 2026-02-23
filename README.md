@@ -95,11 +95,14 @@ Notable backend capabilities:
 pnpm install
 cp .env.example .env
 pnpm dev
+# or HTTPS UI for wallet integrations
+pnpm dev:https
 ```
 
 Open:
 
 - UI: [http://localhost:3000](http://localhost:3000)
+- UI (HTTPS): [https://localhost:3000](https://localhost:3000)
 - Agent health: [http://127.0.0.1:17400/health](http://127.0.0.1:17400/health)
 
 Default ports:

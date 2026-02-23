@@ -1,8 +1,9 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
-import { CheckCircle2, ExternalLink, Wallet } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { CheckCircle2, Copy, ExternalLink, RefreshCw, Wallet } from 'lucide-react';
+import { mnemonicToAccount } from 'viem/accounts';
 import { callFoundryRpc, callWalletRpc } from '@/lib/foundry-rpc';
 import {
   DEFAULT_FOUNDRY_SETTINGS,
@@ -16,11 +17,77 @@ import {
 } from '@/lib/foundry-store';
 
 type InlineStatus = { ok: boolean; message: string };
+type DevWalletSeed = {
+  address: string;
+  derivationPath: string;
+  privateKey: string | null;
+};
 
 const inputClass =
   'h-7 w-full rounded-md border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] px-2 text-[12px] outline-none focus:border-[color:var(--cs-accent)]';
 const btnClass =
   'inline-flex h-7 items-center gap-1.5 rounded-md border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] px-2 text-[11px] font-medium text-[color:var(--cs-fg)] transition-colors hover:bg-[color:var(--cs-hover)] disabled:opacity-50';
+const DEFAULT_ANVIL_DEV_MNEMONIC = 'test test test test test test test test test test test junk';
+
+function isAddress(value: unknown): value is string {
+  return typeof value === 'string' && /^0x[0-9a-fA-F]{40}$/.test(value);
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return `0x${Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function deriveDefaultAnvilWallet(index: number): { address: string; privateKey: string | null } {
+  const derived = mnemonicToAccount(DEFAULT_ANVIL_DEV_MNEMONIC, { addressIndex: index });
+  const hdKey = derived.getHdKey();
+  const privateKey = hdKey.privateKey ? bytesToHex(hdKey.privateKey) : null;
+  return { address: derived.address.toLowerCase(), privateKey };
+}
+
+function deriveDefaultAnvilPrivateKeys(addresses: string[]): string[] | null {
+  const keys: string[] = [];
+  for (let index = 0; index < addresses.length; index += 1) {
+    const derived = deriveDefaultAnvilWallet(index);
+    if (derived.address !== addresses[index] || !derived.privateKey) return null;
+    keys.push(derived.privateKey);
+  }
+  return keys;
+}
+
+function isLocalRpcUrl(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  } catch {
+    return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?/i.test(trimmed);
+  }
+}
+
+function resolveWalletChainRpcUrl(rpcUrl: string): string {
+  if (!isLocalRpcUrl(rpcUrl)) return rpcUrl;
+  if (typeof window === 'undefined') return rpcUrl;
+  return `${window.location.origin}/api/foundry/wallet-rpc`;
+}
+
+function toRpcHex(value: bigint): string {
+  return `0x${value.toString(16)}`;
+}
+
+function parseEthToWei(value: string): bigint | null {
+  const raw = value.trim();
+  if (!raw) return null;
+  const match = raw.match(/^(\d+)(?:\.(\d{0,18}))?$/);
+  if (!match) return null;
+  const whole = BigInt(match[1]);
+  const fractionRaw = match[2] ?? '';
+  const fractionPadded = `${fractionRaw}${'0'.repeat(18 - fractionRaw.length)}`;
+  const fraction = fractionPadded ? BigInt(fractionPadded) : BigInt(0);
+  return whole * BigInt(10) ** BigInt(18) + fraction;
+}
 
 function shortAddress(value: string | null): string {
   if (!value) return 'Not connected';
@@ -70,6 +137,11 @@ export function FoundrySettingsCard() {
   const [settingsStatus, setSettingsStatus] = useState<InlineStatus | null>(null);
   const [rpcStatus, setRpcStatus] = useState<InlineStatus | null>(null);
   const [walletStatus, setWalletStatus] = useState<InlineStatus | null>(null);
+  const [devWalletSeeds, setDevWalletSeeds] = useState<DevWalletSeed[]>([]);
+  const [devWalletStatus, setDevWalletStatus] = useState<InlineStatus | null>(null);
+  const [loadingDevWallets, setLoadingDevWallets] = useState(false);
+  const [fundingDevWallets, setFundingDevWallets] = useState(false);
+  const [fundAmountEth, setFundAmountEth] = useState('10000');
 
   useEffect(() => {
     setDraft(settings);
@@ -79,6 +151,130 @@ export function FoundrySettingsCard() {
     if (!wallet.chainIdHex) return null;
     return fromChainIdHex(wallet.chainIdHex);
   }, [wallet.chainIdHex]);
+  const localMainnetWarning = useMemo(
+    () => isLocalRpcUrl(draft.rpcUrl) && draft.chainId === 1,
+    [draft.chainId, draft.rpcUrl],
+  );
+  const effectiveWalletRpcUrl = useMemo(() => resolveWalletChainRpcUrl(draft.rpcUrl), [draft.rpcUrl]);
+
+  const loadDevWalletSeeds = useCallback(async () => {
+    setLoadingDevWallets(true);
+    setDevWalletStatus(null);
+    try {
+      const addressesRaw = await callFoundryRpc<unknown>({
+        rpcUrl: settings.rpcUrl,
+        method: 'eth_accounts',
+        chainId: settings.chainId,
+      });
+      if (!Array.isArray(addressesRaw)) {
+        throw new Error('Foundry RPC returned an invalid account list.');
+      }
+      const addresses = addressesRaw.filter(isAddress).map((address) => address.toLowerCase());
+      const derivedPrivateKeys = deriveDefaultAnvilPrivateKeys(addresses);
+
+      const next = addresses.map((address, index) => ({
+        address,
+        derivationPath: `m/44'/60'/0'/0/${index}`,
+        privateKey: derivedPrivateKeys?.[index] ?? null,
+      }));
+      setDevWalletSeeds(next);
+
+      if (!next.length) {
+        setDevWalletStatus({ ok: false, message: 'No preloaded dev wallets were returned by this RPC endpoint.' });
+      } else if (!derivedPrivateKeys) {
+        setDevWalletStatus({
+          ok: false,
+          message:
+            'Detected custom dev wallets. Private keys can only be derived automatically for the default Anvil mnemonic.',
+        });
+      }
+    } catch (err) {
+      setDevWalletSeeds([]);
+      setDevWalletStatus({
+        ok: false,
+        message: err instanceof Error ? err.message : 'Failed to read preloaded dev wallets.',
+      });
+    } finally {
+      setLoadingDevWallets(false);
+    }
+  }, [settings.chainId, settings.rpcUrl]);
+
+  async function onCopyPrivateKey(privateKey: string | null, label: string) {
+    if (!privateKey) return;
+    try {
+      await navigator.clipboard.writeText(privateKey);
+      setDevWalletStatus({ ok: true, message: `Private key copied for ${label}.` });
+    } catch {
+      setDevWalletStatus({ ok: false, message: `Failed to copy private key for ${label}.` });
+    }
+  }
+
+  async function onFundWallets() {
+    setFundingDevWallets(true);
+    setDevWalletStatus(null);
+    try {
+      if (!isLocalRpcUrl(settings.rpcUrl)) {
+        throw new Error('Funding wallets is only supported on local Anvil RPC endpoints.');
+      }
+      const wei = parseEthToWei(fundAmountEth);
+      if (wei == null || wei <= BigInt(0)) {
+        throw new Error('Fund amount must be a positive decimal number with up to 18 decimals.');
+      }
+      const balanceHex = toRpcHex(wei);
+      const targets = new Set<string>();
+      for (const item of devWalletSeeds) {
+        if (isAddress(item.address)) targets.add(item.address.toLowerCase());
+      }
+      if (wallet.address && isAddress(wallet.address)) {
+        targets.add(wallet.address.toLowerCase());
+      }
+      const provider = getEthereumProvider();
+      if (provider) {
+        try {
+          const injectedAccounts = await callWalletRpc<unknown>({
+            provider,
+            method: 'eth_accounts',
+            rpcUrl: settings.rpcUrl,
+            chainId: settings.chainId,
+          });
+          if (Array.isArray(injectedAccounts)) {
+            for (const account of injectedAccounts) {
+              if (isAddress(account)) targets.add(account.toLowerCase());
+            }
+          }
+        } catch {
+          // Ignore wallet account read errors and continue with available targets.
+        }
+      }
+      if (!targets.size) {
+        throw new Error('No wallets available to fund. Refresh wallet list and connect wallet first.');
+      }
+
+      for (const address of targets) {
+        await callFoundryRpc({
+          rpcUrl: settings.rpcUrl,
+          method: 'anvil_setBalance',
+          params: [address, balanceHex],
+          chainId: settings.chainId,
+        });
+      }
+      setDevWalletStatus({
+        ok: true,
+        message: `Set ${targets.size} wallet balance(s) to ${fundAmountEth.trim()} ${settings.currencySymbol}.`,
+      });
+    } catch (err) {
+      setDevWalletStatus({
+        ok: false,
+        message: err instanceof Error ? err.message : 'Failed to fund wallets.',
+      });
+    } finally {
+      setFundingDevWallets(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadDevWalletSeeds();
+  }, [loadDevWalletSeeds]);
 
   async function onSaveSettings(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -247,17 +443,20 @@ export function FoundrySettingsCard() {
       const chainIdHex = toChainIdHex(targetChainId);
 
       try {
+        const cfg = normalizeSettingsDraft(draft);
+        const walletRpcUrl = resolveWalletChainRpcUrl(cfg.rpcUrl);
         await callWalletRpc({
           provider,
           method: 'wallet_switchEthereumChain',
           params: [{ chainId: chainIdHex }],
-          rpcUrl: settings.rpcUrl,
+          rpcUrl: walletRpcUrl,
           chainId: targetChainId,
         });
       } catch (err) {
         const code = (err as { code?: unknown } | null)?.code;
         if (code !== 4902) throw err;
         const cfg = normalizeSettingsDraft(draft);
+        const walletRpcUrl = resolveWalletChainRpcUrl(cfg.rpcUrl);
         await callWalletRpc({
           provider,
           method: 'wallet_addEthereumChain',
@@ -265,7 +464,7 @@ export function FoundrySettingsCard() {
             {
               chainId: chainIdHex,
               chainName: cfg.chainName,
-              rpcUrls: [cfg.rpcUrl],
+              rpcUrls: [walletRpcUrl],
               nativeCurrency: {
                 name: cfg.currencySymbol,
                 symbol: cfg.currencySymbol,
@@ -274,7 +473,7 @@ export function FoundrySettingsCard() {
               blockExplorerUrls: cfg.blockExplorerUrl ? [cfg.blockExplorerUrl] : [],
             },
           ],
-          rpcUrl: cfg.rpcUrl,
+          rpcUrl: walletRpcUrl,
           chainId: cfg.chainId,
         });
       }
@@ -314,6 +513,13 @@ export function FoundrySettingsCard() {
           <p className="mb-2 text-[11px] text-[color:var(--cs-muted)]">
             Configure the Anvil/Foundry JSON-RPC endpoint used by Contract Sandbox and wallet actions.
           </p>
+          <p className="mb-2 text-[11px] text-[color:var(--cs-muted)]">
+            Chain ID and chain name are managed in <span className="font-medium">Anvil Fork (Agent)</span> below.
+          </p>
+          <p className="mb-2 text-[10px] text-[color:var(--cs-muted)]">
+            Wallet chain registration uses <span className="font-mono">{effectiveWalletRpcUrl}</span>
+            {isLocalRpcUrl(draft.rpcUrl) ? ' (HTTPS bridge for local Anvil).' : '.'}
+          </p>
           <form className="grid grid-cols-1 gap-2 md:grid-cols-2" onSubmit={onSaveSettings}>
             <Field label="RPC URL">
               <input
@@ -323,24 +529,10 @@ export function FoundrySettingsCard() {
                 placeholder="http://127.0.0.1:8545"
               />
             </Field>
-            <Field label="Chain ID">
-              <input
-                type="number"
-                min={1}
-                step={1}
-                className={inputClass}
-                value={String(draft.chainId)}
-                onChange={(e) =>
-                  setDraft((prev) => ({ ...prev, chainId: Number.parseInt(e.target.value, 10) || 0 }))
-                }
-              />
-            </Field>
-            <Field label="Chain Name">
-              <input
-                className={inputClass}
-                value={draft.chainName}
-                onChange={(e) => setDraft((prev) => ({ ...prev, chainName: e.target.value }))}
-              />
+            <Field label="Effective Chain (from Anvil Fork)">
+              <div className="flex h-7 items-center rounded-md border border-[color:var(--cs-border)] bg-[color:var(--cs-panel-soft)] px-2 font-mono text-[12px] text-[color:var(--cs-fg)]">
+                {draft.chainName} (#{draft.chainId})
+              </div>
             </Field>
             <Field label="Currency Symbol">
               <input
@@ -404,19 +596,32 @@ export function FoundrySettingsCard() {
               <button
                 type="button"
                 onClick={() => {
-                  setDraft(DEFAULT_FOUNDRY_SETTINGS);
+                  setDraft((prev) => ({
+                    ...DEFAULT_FOUNDRY_SETTINGS,
+                    rpcUrl: prev.rpcUrl,
+                    chainId: prev.chainId,
+                    chainName: prev.chainName,
+                    currencySymbol: prev.currencySymbol,
+                    blockExplorerUrl: prev.blockExplorerUrl,
+                  }));
                   setSettingsStatus(null);
                   setRpcStatus(null);
                 }}
                 className={btnClass}
               >
-                Reset Defaults
+                Reset Runtime Defaults
               </button>
             </div>
             {settingsStatus ? (
               <InlineMessage ok={settingsStatus.ok} message={settingsStatus.message} />
             ) : null}
             {rpcStatus ? <InlineMessage ok={rpcStatus.ok} message={rpcStatus.message} /> : null}
+            {localMainnetWarning ? (
+              <div className="border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-700 md:col-span-2">
+                Local RPC with chainId 1 can conflict with MetaMask mainnet. In Anvil Fork settings, use a
+                non-mainnet chainId (for example 31337) for reliable wallet switching.
+              </div>
+            ) : null}
             <div className="text-[10px] text-[color:var(--cs-muted)] md:col-span-2">
               Default local node: <code className="font-mono">anvil --host 127.0.0.1 --port 8545</code>
             </div>
@@ -432,6 +637,12 @@ export function FoundrySettingsCard() {
           <p className="text-[11px] text-[color:var(--cs-muted)]">
             Connect your injected wallet and authenticate for Contract Sandbox transactions.
           </p>
+          <p className="text-[10px] text-[color:var(--cs-muted)]">
+            For local Anvil (`127.0.0.1/localhost`), chain add/switch uses HTTPS bridge URL automatically.
+          </p>
+          <div className="rounded border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] px-2 py-1.5 font-mono text-[10px] text-[color:var(--cs-muted)]">
+            Wallet RPC (MetaMask): {effectiveWalletRpcUrl}
+          </div>
           <div className="grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-[11px] sm:grid-cols-4">
             <Info label="Address" value={shortAddress(wallet.address)} />
             <Info label="Chain" value={wallet.chainIdHex ?? '—'} />
@@ -484,6 +695,94 @@ export function FoundrySettingsCard() {
             </Link>{' '}
             to send or simulate transactions.
           </p>
+        </div>
+      </div>
+
+      <div className="border-b border-[color:var(--cs-border)]">
+        <div className="border-b border-[color:var(--cs-border)] bg-[color:var(--cs-panel-soft)] px-3 py-1.5 text-[10px] font-bold uppercase text-[color:var(--cs-muted)]">
+          Preloaded Dev Wallet Private Keys
+        </div>
+        <div className="space-y-2 px-3 py-2">
+          <p className="text-[11px] text-[color:var(--cs-muted)]">
+            Foundry preloads local wallets for testing. Copy each private key to import that wallet.
+          </p>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={loadingDevWallets}
+              onClick={() => void loadDevWalletSeeds()}
+              className={btnClass}
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${loadingDevWallets ? 'animate-spin' : ''}`} />
+              {loadingDevWallets ? 'Refreshing…' : 'Refresh Wallet List'}
+            </button>
+            <label className="flex items-center gap-2 rounded-md border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] px-2 text-[10px] text-[color:var(--cs-muted)]">
+              Fund amount ({settings.currencySymbol})
+              <input
+                className="h-6 w-24 rounded border border-[color:var(--cs-border)] bg-[color:var(--cs-panel-soft)] px-1.5 font-mono text-[11px] text-[color:var(--cs-fg)] outline-none focus:border-[color:var(--cs-accent)]"
+                value={fundAmountEth}
+                onChange={(e) => setFundAmountEth(e.target.value)}
+                placeholder="10000"
+              />
+            </label>
+            <button
+              type="button"
+              disabled={fundingDevWallets}
+              onClick={() => void onFundWallets()}
+              className={btnClass}
+              title="Set listed wallet balances via anvil_setBalance on the current local Foundry RPC."
+            >
+              {fundingDevWallets ? 'Funding…' : 'Fund Wallets'}
+            </button>
+          </div>
+
+          <p className="text-[10px] text-[color:var(--cs-muted)]">
+            Funds listed dev wallets and detected injected wallet accounts. Uses local Anvil only.
+          </p>
+
+          {devWalletSeeds.length ? (
+            <div className="space-y-1">
+              {devWalletSeeds.map((walletSeed, index) => (
+                <div
+                  key={walletSeed.address}
+                  className="space-y-1 rounded border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] p-2"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[10px] font-bold uppercase text-[color:var(--cs-muted)]">
+                      Wallet {index + 1}
+                    </span>
+                    <span className="font-mono text-[10px] text-[color:var(--cs-muted)]">
+                      {walletSeed.derivationPath}
+                    </span>
+                  </div>
+                  <div className="font-mono text-[11px] text-[color:var(--cs-fg)]">{walletSeed.address}</div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <code className="rounded border border-[color:var(--cs-border)] bg-[color:var(--cs-panel-soft)] px-1.5 py-1 font-mono text-[10px] text-[color:var(--cs-fg)]">
+                      {walletSeed.privateKey ?? 'Private key unavailable (custom wallet configuration).'}
+                    </code>
+                    <button
+                      type="button"
+                      disabled={!walletSeed.privateKey}
+                      onClick={() => void onCopyPrivateKey(walletSeed.privateKey, `Wallet ${index + 1}`)}
+                      className={btnClass}
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                      Copy Private Key
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : loadingDevWallets ? (
+            <div className="text-[11px] text-[color:var(--cs-muted)]">Loading dev wallets…</div>
+          ) : (
+            <div className="text-[11px] text-[color:var(--cs-muted)]">
+              No preloaded wallets found. Confirm Foundry RPC is running locally.
+            </div>
+          )}
+
+          {devWalletStatus ? <InlineMessage ok={devWalletStatus.ok} message={devWalletStatus.message} /> : null}
         </div>
       </div>
     </>
