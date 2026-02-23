@@ -1,6 +1,7 @@
 import { CaseFilesCard } from './_components/CaseFilesCard';
 import { AnvilForkSettingsCard } from './_components/AnvilForkSettingsCard';
 import { FoundrySettingsCard } from './_components/FoundrySettingsCard';
+import { FoundryDevToolsCard } from './_components/FoundryDevToolsCard';
 import { ProxySettingsCard } from './_components/ProxySettingsCard';
 import { AiSettingsCard } from './_components/AiSettingsCard';
 import { ZapSettingsCard } from './_components/ZapSettingsCard';
@@ -17,6 +18,7 @@ export default function SettingsPage() {
         <CaseFilesCard />
         <AnvilForkSettingsCard />
         <FoundrySettingsCard />
+        <FoundryDevToolsCard />
         <ProxySettingsCard />
         <ZapSettingsCard />
         <SeedPhraseCard />
