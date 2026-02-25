@@ -1539,82 +1539,137 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
     }
   });
 
-  app.post('/ai/chat', async (req, reply) => {
-    const readEnv = (name: string): string | undefined => {
-      const raw = process.env[name];
-      if (typeof raw !== 'string') return undefined;
-      const out = raw.trim();
-      return out ? out : undefined;
-    };
+  const readEnv = (name: string): string | undefined => {
+    const raw = process.env[name];
+    if (typeof raw !== 'string') return undefined;
+    const out = raw.trim();
+    return out ? out : undefined;
+  };
 
-    const resolveAiProviderConfig = (provider: AiProvider) => {
-      switch (provider) {
-        case 'openrouter': {
-          const extraHeaders: Record<string, string> = {};
-          const referrer = readEnv('OPENROUTER_HTTP_REFERER');
-          const title = readEnv('OPENROUTER_X_TITLE');
-          if (referrer) extraHeaders['HTTP-Referer'] = referrer;
-          if (title) extraHeaders['X-Title'] = title;
-          return {
-            provider,
-            apiKey: readEnv('OPENROUTER_API_KEY'),
-            baseUrl: readEnv('OPENROUTER_BASE_URL') ?? 'https://openrouter.ai/api/v1',
-            defaultModel: readEnv('OPENROUTER_MODEL') ?? 'openai/gpt-4o-mini',
-            requiredApiKeyEnv: 'OPENROUTER_API_KEY',
-            extraHeaders: Object.keys(extraHeaders).length ? extraHeaders : undefined,
-          };
-        }
-        case 'gemini':
-          return {
-            provider,
-            apiKey: readEnv('GEMINI_API_KEY'),
-            baseUrl: readEnv('GEMINI_BASE_URL') ?? 'https://generativelanguage.googleapis.com/v1beta/openai',
-            defaultModel: readEnv('GEMINI_MODEL') ?? 'gemini-2.0-flash',
-            requiredApiKeyEnv: 'GEMINI_API_KEY',
-            extraHeaders: undefined,
-          };
-        case 'grok':
-          return {
-            provider,
-            apiKey: readEnv('GROK_API_KEY') ?? readEnv('XAI_API_KEY'),
-            baseUrl: readEnv('GROK_BASE_URL') ?? readEnv('XAI_BASE_URL') ?? 'https://api.x.ai/v1',
-            defaultModel: readEnv('GROK_MODEL') ?? readEnv('XAI_MODEL') ?? 'grok-2-latest',
-            requiredApiKeyEnv: 'GROK_API_KEY (or XAI_API_KEY)',
-            extraHeaders: undefined,
-          };
-        case 'claude': {
-          const version = readEnv('CLAUDE_API_VERSION') ?? readEnv('ANTHROPIC_VERSION') ?? '2023-06-01';
-          return {
-            provider,
-            apiKey: readEnv('CLAUDE_API_KEY') ?? readEnv('ANTHROPIC_API_KEY'),
-            baseUrl: readEnv('CLAUDE_BASE_URL') ?? readEnv('ANTHROPIC_BASE_URL') ?? 'https://api.anthropic.com',
-            defaultModel: readEnv('CLAUDE_MODEL') ?? readEnv('ANTHROPIC_MODEL') ?? 'claude-3-5-sonnet-latest',
-            requiredApiKeyEnv: 'CLAUDE_API_KEY (or ANTHROPIC_API_KEY)',
-            extraHeaders: { 'anthropic-version': version },
-          };
-        }
-        case 'deepseek':
-          return {
-            provider,
-            apiKey: readEnv('DEEPSEEK_API_KEY'),
-            baseUrl: readEnv('DEEPSEEK_BASE_URL') ?? 'https://api.deepseek.com/v1',
-            defaultModel: readEnv('DEEPSEEK_MODEL') ?? 'deepseek-chat',
-            requiredApiKeyEnv: 'DEEPSEEK_API_KEY',
-            extraHeaders: undefined,
-          };
-        case 'openai':
-        default:
-          return {
-            provider: 'openai' as const,
-            apiKey: readEnv('OPENAI_API_KEY'),
-            baseUrl: readEnv('OPENAI_BASE_URL') ?? 'https://api.openai.com/v1',
-            defaultModel: readEnv('OPENAI_MODEL') ?? 'gpt-5-nano-2025-08-07',
-            requiredApiKeyEnv: 'OPENAI_API_KEY',
-            extraHeaders: undefined,
-          };
+  const resolveAiProviderConfig = (provider: AiProvider) => {
+    switch (provider) {
+      case 'openrouter': {
+        const extraHeaders: Record<string, string> = {};
+        const referrer = readEnv('OPENROUTER_HTTP_REFERER');
+        const title = readEnv('OPENROUTER_X_TITLE');
+        if (referrer) extraHeaders['HTTP-Referer'] = referrer;
+        if (title) extraHeaders['X-Title'] = title;
+        return {
+          provider,
+          apiKey: readEnv('OPENROUTER_API_KEY'),
+          baseUrl: readEnv('OPENROUTER_BASE_URL') ?? 'https://openrouter.ai/api/v1',
+          defaultModel: readEnv('OPENROUTER_MODEL') ?? 'openai/gpt-4o-mini',
+          requiredApiKeyEnv: 'OPENROUTER_API_KEY',
+          extraHeaders: Object.keys(extraHeaders).length ? extraHeaders : undefined,
+        };
       }
-    };
+      case 'gemini':
+        return {
+          provider,
+          apiKey: readEnv('GEMINI_API_KEY'),
+          baseUrl: readEnv('GEMINI_BASE_URL') ?? 'https://generativelanguage.googleapis.com/v1beta/openai',
+          defaultModel: readEnv('GEMINI_MODEL') ?? 'gemini-2.0-flash',
+          requiredApiKeyEnv: 'GEMINI_API_KEY',
+          extraHeaders: undefined,
+        };
+      case 'grok':
+        return {
+          provider,
+          apiKey: readEnv('GROK_API_KEY') ?? readEnv('XAI_API_KEY'),
+          baseUrl: readEnv('GROK_BASE_URL') ?? readEnv('XAI_BASE_URL') ?? 'https://api.x.ai/v1',
+          defaultModel: readEnv('GROK_MODEL') ?? readEnv('XAI_MODEL') ?? 'grok-2-latest',
+          requiredApiKeyEnv: 'GROK_API_KEY (or XAI_API_KEY)',
+          extraHeaders: undefined,
+        };
+      case 'claude': {
+        const version = readEnv('CLAUDE_API_VERSION') ?? readEnv('ANTHROPIC_VERSION') ?? '2023-06-01';
+        return {
+          provider,
+          apiKey: readEnv('CLAUDE_API_KEY') ?? readEnv('ANTHROPIC_API_KEY'),
+          baseUrl: readEnv('CLAUDE_BASE_URL') ?? readEnv('ANTHROPIC_BASE_URL') ?? 'https://api.anthropic.com',
+          defaultModel: readEnv('CLAUDE_MODEL') ?? readEnv('ANTHROPIC_MODEL') ?? 'claude-3-5-sonnet-latest',
+          requiredApiKeyEnv: 'CLAUDE_API_KEY (or ANTHROPIC_API_KEY)',
+          extraHeaders: { 'anthropic-version': version },
+        };
+      }
+      case 'deepseek':
+        return {
+          provider,
+          apiKey: readEnv('DEEPSEEK_API_KEY'),
+          baseUrl: readEnv('DEEPSEEK_BASE_URL') ?? 'https://api.deepseek.com/v1',
+          defaultModel: readEnv('DEEPSEEK_MODEL') ?? 'deepseek-chat',
+          requiredApiKeyEnv: 'DEEPSEEK_API_KEY',
+          extraHeaders: undefined,
+        };
+      case 'openai':
+      default:
+        return {
+          provider: 'openai' as const,
+          apiKey: readEnv('OPENAI_API_KEY'),
+          baseUrl: readEnv('OPENAI_BASE_URL') ?? 'https://api.openai.com/v1',
+          defaultModel: readEnv('OPENAI_MODEL') ?? 'gpt-5-nano-2025-08-07',
+          requiredApiKeyEnv: 'OPENAI_API_KEY',
+          extraHeaders: undefined,
+        };
+    }
+  };
 
+  const runChatWithResolvedConfig = async (
+    body: ReturnType<typeof AiChatRequestSchema.parse>,
+    onProgress?: (event: unknown) => void,
+  ) => {
+    const providerConfig = resolveAiProviderConfig(body.provider);
+    if (!providerConfig.apiKey) {
+      return {
+        ok: false as const,
+        statusCode: 503,
+        error: {
+          code: 'ai_unconfigured',
+          message: `${providerConfig.requiredApiKeyEnv} is not configured in the agent environment.`,
+        },
+      };
+    }
+
+    const selectedModel = body.model ?? providerConfig.defaultModel;
+    const payload = await runAiAgentChat({
+      db: projects.db(),
+      request: body,
+      aiProvider: providerConfig.provider,
+      aiApiKey: providerConfig.apiKey,
+      aiModel: selectedModel,
+      aiBaseUrl: providerConfig.baseUrl,
+      aiExtraHeaders: providerConfig.extraHeaders,
+      publishEvent,
+      onProgress,
+      rpcCall: async (method, params = []) => await foundry.rpcCall(method, params),
+      invokeLocal: async (i) => {
+        const injectOpts: { method: 'POST' | 'GET'; url: string; payload?: unknown } = {
+          method: i.method,
+          url: i.url,
+        };
+        if (i.payload !== undefined) injectOpts.payload = i.payload;
+
+        const res = await new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
+          app.inject(injectOpts as never, (err, response) => {
+            if (err) return reject(err);
+            if (!response) return reject(new Error('No response from local injection.'));
+            resolve({ statusCode: response.statusCode, body: response.body });
+          });
+        });
+        let parsedBody: unknown;
+        try {
+          parsedBody = JSON.parse(res.body);
+        } catch {
+          parsedBody = res.body;
+        }
+        return { statusCode: res.statusCode, body: parsedBody };
+      },
+    });
+    AiChatResponseSchema.parse(payload);
+    return { ok: true as const, payload };
+  };
+
+  app.post('/ai/chat', async (req, reply) => {
     let body: ReturnType<typeof AiChatRequestSchema.parse>;
     try {
       body = AiChatRequestSchema.parse(req.body ?? {});
@@ -1626,56 +1681,13 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
       };
     }
 
-    const providerConfig = resolveAiProviderConfig(body.provider);
-    if (!providerConfig.apiKey) {
-      reply.code(503);
-      return {
-        ok: false,
-        error: {
-          code: 'ai_unconfigured',
-          message: `${providerConfig.requiredApiKeyEnv} is not configured in the agent environment.`,
-        },
-      };
-    }
-
-    const selectedModel = body.model ?? providerConfig.defaultModel;
-
     try {
-      const payload = await runAiAgentChat({
-        db: projects.db(),
-        request: body,
-        aiProvider: providerConfig.provider,
-        aiApiKey: providerConfig.apiKey,
-        aiModel: selectedModel,
-        aiBaseUrl: providerConfig.baseUrl,
-        aiExtraHeaders: providerConfig.extraHeaders,
-        publishEvent,
-        rpcCall: async (method, params = []) => await foundry.rpcCall(method, params),
-        invokeLocal: async (i) => {
-          const injectOpts: { method: 'POST' | 'GET'; url: string; payload?: unknown } = {
-            method: i.method,
-            url: i.url,
-          };
-          if (i.payload !== undefined) injectOpts.payload = i.payload;
-
-          const res = await new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
-            app.inject(injectOpts as never, (err, response) => {
-              if (err) return reject(err);
-              if (!response) return reject(new Error('No response from local injection.'));
-              resolve({ statusCode: response.statusCode, body: response.body });
-            });
-          });
-          let parsedBody: unknown;
-          try {
-            parsedBody = JSON.parse(res.body);
-          } catch {
-            parsedBody = res.body;
-          }
-          return { statusCode: res.statusCode, body: parsedBody };
-        },
-      });
-      AiChatResponseSchema.parse(payload);
-      return payload;
+      const result = await runChatWithResolvedConfig(body);
+      if (!result.ok) {
+        reply.code(result.statusCode);
+        return { ok: false, error: result.error };
+      }
+      return result.payload;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       reply.code(502);
@@ -1683,6 +1695,73 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
         ok: false,
         error: { code: 'ai_chat_failed', message },
       };
+    }
+  });
+
+  app.post('/ai/chat/stream', async (req, reply) => {
+    let body: ReturnType<typeof AiChatRequestSchema.parse>;
+    try {
+      body = AiChatRequestSchema.parse(req.body ?? {});
+    } catch (err) {
+      reply.code(400);
+      return {
+        ok: false,
+        error: { code: 'bad_request', message: err instanceof Error ? err.message : 'Bad body' },
+      };
+    }
+
+    reply.hijack();
+    const raw = reply.raw;
+    let closed = false;
+    req.raw.on('close', () => {
+      closed = true;
+    });
+
+    raw.statusCode = 200;
+    raw.setHeader('content-type', 'text/event-stream; charset=utf-8');
+    raw.setHeader('cache-control', 'no-store, no-transform');
+    raw.setHeader('connection', 'keep-alive');
+    if (typeof raw.flushHeaders === 'function') raw.flushHeaders();
+
+    const writeEvent = (event: unknown): void => {
+      if (closed) return;
+      const kind =
+        event &&
+        typeof event === 'object' &&
+        !Array.isArray(event) &&
+        typeof (event as { type?: unknown }).type === 'string'
+          ? (event as { type: string }).type
+          : 'message';
+      raw.write(`event: ${kind}\n`);
+      raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    const writeError = (code: string, message: string): void => {
+      writeEvent({
+        type: 'error',
+        createdAt: new Date().toISOString(),
+        error: { code, message },
+      });
+    };
+
+    try {
+      const result = await runChatWithResolvedConfig(body, (event) => {
+        writeEvent(event);
+      });
+      if (!result.ok) {
+        writeError(result.error.code, result.error.message);
+      } else {
+        writeEvent({
+          type: 'done',
+          createdAt: new Date().toISOString(),
+          response: result.payload,
+        });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      writeError('ai_chat_failed', message);
+    } finally {
+      if (!closed) raw.end();
     }
   });
 

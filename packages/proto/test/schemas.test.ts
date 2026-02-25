@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { AiChatResponseSchema, HealthResponseSchema, ScannerRunResponseSchema } from '../src/schemas';
+import {
+  AiChatResponseSchema,
+  AiChatStreamEventSchema,
+  HealthResponseSchema,
+  ScannerRunResponseSchema,
+} from '../src/schemas';
 
 describe('HealthResponseSchema', () => {
   it('accepts a valid payload', () => {
@@ -102,5 +107,32 @@ describe('AiChatResponseSchema', () => {
 
     expect(parsed.ok).toBe(true);
     expect(parsed.toolCalls.length).toBe(1);
+  });
+});
+
+describe('AiChatStreamEventSchema', () => {
+  it('accepts a done event with a full ai response payload', () => {
+    const parsed = AiChatStreamEventSchema.parse({
+      type: 'done',
+      createdAt: new Date().toISOString(),
+      response: {
+        ok: true,
+        status: 'completed',
+        mode: 'smart_contract_audit',
+        model: 'gpt-4.1-mini',
+        assistant: {
+          role: 'assistant',
+          content: 'Summary\n- Completed.',
+          createdAt: new Date().toISOString(),
+        },
+        toolCalls: [],
+        warnings: [],
+      },
+    });
+
+    expect(parsed.type).toBe('done');
+    if (parsed.type === 'done') {
+      expect(parsed.response.ok).toBe(true);
+    }
   });
 });

@@ -105,6 +105,37 @@ function findLastToolMessage(
   return undefined;
 }
 
+function parseSseEvents(body: string): Array<{ event: string | null; payload: unknown }> {
+  const blocks = body.replaceAll('\r\n', '\n').split('\n\n');
+  const out: Array<{ event: string | null; payload: unknown }> = [];
+  for (const block of blocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+    const lines = trimmed.split('\n');
+    let event: string | null = null;
+    const dataLines: string[] = [];
+    for (const line of lines) {
+      if (line.startsWith('event:')) {
+        const value = line.slice('event:'.length).trim();
+        event = value || null;
+        continue;
+      }
+      if (line.startsWith('data:')) {
+        dataLines.push(line.slice('data:'.length).trimStart());
+      }
+    }
+    if (dataLines.length === 0) continue;
+    let payload: unknown = dataLines.join('\n');
+    try {
+      payload = JSON.parse(dataLines.join('\n'));
+    } catch {
+      payload = dataLines.join('\n');
+    }
+    out.push({ event, payload });
+  }
+  return out;
+}
+
 describe('agent /ai/chat', () => {
   it('returns ai_unconfigured when OPENAI_API_KEY is missing', async () => {
     delete process.env.OPENAI_API_KEY;
@@ -507,6 +538,97 @@ describe('agent /ai/chat', () => {
     expect(Array.isArray(json.toolCalls)).toBe(true);
     expect(json.toolCalls.length).toBe(1);
     expect(json.toolCalls[0].name).toBe('list_messages');
+    expect(callCount).toBe(2);
+
+    await close();
+  });
+
+  it('streams run progress, tool calls, and final payload over /ai/chat/stream', async () => {
+    process.env.OPENAI_API_KEY = 'test-openai-key';
+    process.env.OPENAI_MODEL = 'gpt-4.1-mini';
+
+    let callCount = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      callCount += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as { messages?: unknown[] };
+      expect(Array.isArray(body.messages)).toBe(true);
+
+      if (callCount === 1) {
+        return new Response(
+          JSON.stringify({
+            model: 'gpt-4.1-mini',
+            choices: [
+              {
+                message: {
+                  role: 'assistant',
+                  content: '',
+                  tool_calls: [
+                    {
+                      id: 'stream_call_1',
+                      type: 'function',
+                      function: { name: 'list_messages', arguments: '{"limit":3}' },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          model: 'gpt-4.1-mini',
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content: 'Summary\\n- Streamed analysis complete.',
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cipherscope-agent-ai-'));
+    const dbPath = path.join(tmpDir, 'agent.db');
+    const { app, close } = await buildApp({
+      dbPath,
+      agentName: 'cipherscope-agent',
+      agentVersion: '0.0.0-test',
+      proxyHost: '127.0.0.1',
+      proxyPort: 0,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/ai/chat/stream',
+      payload: {
+        mode: 'smart_contract_audit',
+        maxSteps: 4,
+        messages: [{ role: 'user', content: 'Run and stream progress.' }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(String(res.headers['content-type'] ?? '')).toContain('text/event-stream');
+
+    const events = parseSseEvents(res.body);
+    const eventNames = events.map((item) => item.event);
+    expect(eventNames).toContain('run_started');
+    expect(eventNames).toContain('tool_call_started');
+    expect(eventNames).toContain('tool_call_completed');
+    expect(eventNames).toContain('done');
+
+    const doneEvent = events.find((item) => item.event === 'done');
+    expect(doneEvent).toBeTruthy();
+    const donePayload = doneEvent?.payload as { response?: { assistant?: { content?: string } } } | undefined;
+    expect(String(donePayload?.response?.assistant?.content ?? '')).toContain(
+      'Streamed analysis complete',
+    );
     expect(callCount).toBe(2);
 
     await close();

@@ -1,6 +1,9 @@
 'use client';
 
-import { AiChatResponseSchema, type AiAgentMode } from '@cipherscope/proto';
+import {
+  AiChatResponseSchema,
+  type AiAgentMode,
+} from '@cipherscope/proto';
 import {
   AlertTriangle,
   Copy,
@@ -97,6 +100,65 @@ type HttpMessageReferenceDetail = {
   error?: string | null;
 };
 
+type AiChatStreamEvent =
+  | {
+      type: 'run_started';
+      createdAt: string;
+      mode: string;
+      provider: string;
+      model: string;
+      maxSteps: number;
+    }
+  | {
+      type: 'thinking';
+      createdAt: string;
+      step: number;
+      maxSteps: number;
+      message: string;
+    }
+  | {
+      type: 'status';
+      createdAt: string;
+      message: string;
+    }
+  | {
+      type: 'tool_call_started';
+      createdAt: string;
+      step: number;
+      id: string;
+      name: string;
+      args: Record<string, unknown>;
+    }
+  | {
+      type: 'tool_call_completed';
+      createdAt: string;
+      step: number;
+      id: string;
+      name: string;
+      args: Record<string, unknown>;
+      ok: boolean;
+      summary: string;
+      error: string | null;
+    }
+  | {
+      type: 'warning';
+      createdAt: string;
+      message: string;
+    }
+  | {
+      type: 'done';
+      createdAt: string;
+      response: unknown;
+    }
+  | {
+      type: 'error';
+      createdAt: string;
+      error: {
+        code: string;
+        message: string;
+      };
+    };
+
 const RUNNER_TABS: Array<{
   id: RunnerTabId;
   label: string;
@@ -124,6 +186,7 @@ const MAX_REFERENCE_SNIPPET_CHARS = 700;
 const AGENT_RETRY_MAX_ATTEMPTS = 8;
 const AGENT_RETRY_BASE_DELAY_MS = 1000;
 const AGENT_RETRY_MAX_DELAY_MS = 10000;
+const MAX_LIVE_TRACE_LINES = 10;
 const EMPTY_MESSAGES: ChatMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolCallEntry[] = [];
 
@@ -189,6 +252,79 @@ function shortJson(value: unknown, max = 240): string {
   }
 }
 
+class StreamUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StreamUnsupportedError';
+  }
+}
+
+function upsertToolCallEntry(entries: ToolCallEntry[], next: ToolCallEntry): ToolCallEntry[] {
+  const idx = entries.findIndex((entry) => entry.id === next.id);
+  if (idx < 0) return [...entries, next];
+  const out = entries.slice();
+  out[idx] = { ...out[idx], ...next, args: next.args };
+  return out;
+}
+
+function mergeFinalToolCalls(
+  existing: ToolCallEntry[],
+  incoming: Array<{
+    id: string;
+    name: string;
+    args: Record<string, unknown>;
+    ok: boolean;
+    summary: string;
+    error: string | null;
+  }>,
+  createdAt: string,
+): ToolCallEntry[] {
+  let next = existing.slice();
+  for (const call of incoming) {
+    const existingEntry = next.find((entry) => entry.id === call.id);
+    next = upsertToolCallEntry(next, {
+      id: call.id,
+      name: call.name,
+      args: call.args,
+      ok: call.ok,
+      summary: call.summary,
+      error: call.error,
+      createdAt: existingEntry?.createdAt ?? createdAt,
+    });
+  }
+  return next;
+}
+
+function appendTraceLine(lines: string[], line: string): string[] {
+  const trimmed = line.trim();
+  if (!trimmed) return lines;
+  const next = [...lines, trimmed];
+  if (next.length <= MAX_LIVE_TRACE_LINES) return next;
+  return next.slice(next.length - MAX_LIVE_TRACE_LINES);
+}
+
+type SsePacket = { event: string | null; data: string };
+
+function parseSsePacket(block: string): SsePacket | null {
+  const normalized = block.replaceAll('\r', '');
+  const lines = normalized.split('\n');
+  let event: string | null = null;
+  const dataLines: string[] = [];
+  for (const line of lines) {
+    if (!line) continue;
+    if (line.startsWith(':')) continue;
+    if (line.startsWith('event:')) {
+      event = line.slice('event:'.length).trim() || null;
+      continue;
+    }
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice('data:'.length).trimStart());
+    }
+  }
+  if (dataLines.length === 0) return null;
+  return { event, data: dataLines.join('\n') };
+}
+
 function hasWindow(): boolean {
   return typeof window !== 'undefined';
 }
@@ -227,6 +363,83 @@ function asDateString(value: unknown, fallback: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return fallback;
   return date.toISOString();
+}
+
+function asPositiveInt(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  const out = Math.trunc(value);
+  return out > 0 ? out : null;
+}
+
+function parseAiChatStreamEvent(raw: unknown): AiChatStreamEvent | null {
+  const rec = asRecord(raw);
+  if (!rec) return null;
+  const type = asString(rec.type, '');
+  const createdAt = asDateString(rec.createdAt, new Date().toISOString());
+
+  if (type === 'run_started') {
+    const model = asString(rec.model, '').trim();
+    const provider = asString(rec.provider, '').trim();
+    const mode = asString(rec.mode, '').trim();
+    const maxSteps = asPositiveInt(rec.maxSteps);
+    if (!model || !provider || !mode || maxSteps == null) return null;
+    return { type, createdAt, mode, provider, model, maxSteps };
+  }
+
+  if (type === 'thinking') {
+    const message = asString(rec.message, '').trim();
+    const step = asPositiveInt(rec.step);
+    const maxSteps = asPositiveInt(rec.maxSteps);
+    if (!message || step == null || maxSteps == null) return null;
+    return { type, createdAt, step, maxSteps, message };
+  }
+
+  if (type === 'status') {
+    const message = asString(rec.message, '').trim();
+    if (!message) return null;
+    return { type, createdAt, message };
+  }
+
+  if (type === 'tool_call_started') {
+    const id = asString(rec.id, '').trim();
+    const name = asString(rec.name, '').trim();
+    const step = asPositiveInt(rec.step);
+    const args = asRecord(rec.args) ?? {};
+    if (!id || !name || step == null) return null;
+    return { type, createdAt, step, id, name, args };
+  }
+
+  if (type === 'tool_call_completed') {
+    const id = asString(rec.id, '').trim();
+    const name = asString(rec.name, '').trim();
+    const step = asPositiveInt(rec.step);
+    const args = asRecord(rec.args) ?? {};
+    const ok = rec.ok !== false;
+    const summary = asString(rec.summary, '').trim();
+    const error = rec.error == null ? null : asString(rec.error, '');
+    if (!id || !name || step == null || !summary) return null;
+    return { type, createdAt, step, id, name, args, ok, summary, error };
+  }
+
+  if (type === 'warning') {
+    const message = asString(rec.message, '').trim();
+    if (!message) return null;
+    return { type, createdAt, message };
+  }
+
+  if (type === 'done') {
+    return { type, createdAt, response: rec.response };
+  }
+
+  if (type === 'error') {
+    const err = asRecord(rec.error);
+    const code = asString(err?.code, '').trim();
+    const message = asString(err?.message, '').trim();
+    if (!code || !message) return null;
+    return { type, createdAt, error: { code, message } };
+  }
+
+  return null;
 }
 
 function normalizeMode(value: unknown): ModeLabel {
@@ -523,6 +736,8 @@ export function RunnerPanel() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [liveTraceConversationId, setLiveTraceConversationId] = useState<string | null>(null);
+  const [liveTraceLines, setLiveTraceLines] = useState<string[]>([]);
   const { settings: aiSettings } = useAiSettings();
 
   async function copyMessageContent(content: string, messageId: string) {
@@ -551,6 +766,8 @@ export function RunnerPanel() {
   const statusLine = selectedConversation?.statusLine ?? DEFAULT_STATUS_LINE;
   const aiProvider = aiSettings.provider;
   const aiModel = getSelectedAiModel(aiSettings);
+  const visibleLiveTrace =
+    busy && selectedConversation && selectedConversation.id === liveTraceConversationId ? liveTraceLines : [];
 
   function updateConversation(
     id: string,
@@ -592,6 +809,32 @@ export function RunnerPanel() {
     updateConversation(selectedConversation.id, updater, updatedAt);
   }
 
+  function appendLiveTrace(conversationId: string, line: string): void {
+    setLiveTraceConversationId((prev) => (prev === conversationId ? prev : conversationId));
+    setLiveTraceLines((prev) => appendTraceLine(prev, line));
+  }
+
+  function clearLiveTrace(conversationId?: string): void {
+    if (conversationId && liveTraceConversationId && liveTraceConversationId !== conversationId) return;
+    setLiveTraceLines([]);
+    setLiveTraceConversationId(null);
+  }
+
+  function upsertConversationToolCall(
+    conversationId: string,
+    toolCall: ToolCallEntry,
+    updatedAt = toolCall.createdAt,
+  ): void {
+    updateConversation(
+      conversationId,
+      (prev) => ({
+        ...prev,
+        toolCalls: upsertToolCallEntry(prev.toolCalls, toolCall),
+      }),
+      updatedAt,
+    );
+  }
+
   function createNewConversation(): void {
     if (!conversationsReady || busy) return;
     const now = new Date().toISOString();
@@ -601,6 +844,7 @@ export function RunnerPanel() {
       conversations: [freshConversation, ...prev.conversations].slice(0, MAX_CONVERSATIONS),
     }));
     setPrompt('');
+    clearLiveTrace();
     setActiveTab('chat');
   }
 
@@ -612,6 +856,7 @@ export function RunnerPanel() {
       return { ...prev, selectedConversationId: id };
     });
     setPrompt('');
+    clearLiveTrace();
     setActiveTab('chat');
   }
 
@@ -645,7 +890,7 @@ export function RunnerPanel() {
     const el = chatScrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [activeTab, messages, toolCalls, busy, selectedConversationId]);
+  }, [activeTab, messages, toolCalls, busy, liveTraceLines, selectedConversationId]);
 
   const toolFailures = useMemo(() => toolCalls.filter((item) => !item.ok), [toolCalls]);
 
@@ -702,6 +947,261 @@ export function RunnerPanel() {
     return items;
   }, [messages, toolCalls]);
 
+  function applyCompletedRun(
+    conversationId: string,
+    parsed: ReturnType<typeof AiChatResponseSchema.parse>,
+  ): void {
+    const assistantMessage: ChatMessage = {
+      id: createId(),
+      role: 'assistant',
+      content: parsed.assistant.content,
+      createdAt: parsed.assistant.createdAt,
+    };
+    const diagnosticContent = buildAgentDiagnosticMessage({
+      status: parsed.status,
+      warnings: parsed.warnings,
+      toolCalls: parsed.toolCalls,
+    });
+    const diagnosticMessage: ChatMessage | null =
+      diagnosticContent ?
+        {
+          id: createId(),
+          role: 'assistant',
+          content: diagnosticContent,
+          createdAt: parsed.assistant.createdAt,
+        }
+      : null;
+
+    const lastTool = parsed.toolCalls.at(-1);
+    const failureCount = parsed.toolCalls.filter((call) => !call.ok).length;
+    const baseStatus =
+      parsed.status === 'completed'
+        ? 'Run complete.'
+        : 'Run hit max autonomous steps.';
+    updateConversation(
+      conversationId,
+      (prev) => ({
+        ...prev,
+        messages: diagnosticMessage ?
+            [...prev.messages, assistantMessage, diagnosticMessage]
+          : [...prev.messages, assistantMessage],
+        toolCalls: mergeFinalToolCalls(prev.toolCalls, parsed.toolCalls, parsed.assistant.createdAt),
+        statusLine:
+          failureCount > 0 ?
+            `${baseStatus} ${failureCount} tool call${failureCount === 1 ? '' : 's'} failed.`
+          : lastTool ?
+            `${baseStatus} Last action: ${lastTool.summary}`
+          : baseStatus,
+      }),
+      parsed.assistant.createdAt,
+    );
+  }
+
+  async function runPromptLegacy(
+    requestBody: Record<string, unknown>,
+    conversationId: string,
+    controller: AbortController,
+  ): Promise<ReturnType<typeof AiChatResponseSchema.parse>> {
+    let parsed: ReturnType<typeof AiChatResponseSchema.parse> | null = null;
+    for (let attempt = 1; attempt <= AGENT_RETRY_MAX_ATTEMPTS; attempt += 1) {
+      let res: Response;
+      try {
+        res = await fetch('/api/ai/chat', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        });
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') throw err;
+        if (attempt >= AGENT_RETRY_MAX_ATTEMPTS) {
+          throw new Error(
+            `Agent is unreachable after ${AGENT_RETRY_MAX_ATTEMPTS} reconnect attempts. Start it with "pnpm dev" and retry.`,
+          );
+        }
+        const retryDelayMs = Math.min(
+          AGENT_RETRY_MAX_DELAY_MS,
+          AGENT_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
+        );
+        const retryInSec = Math.max(1, Math.round(retryDelayMs / 1000));
+        updateConversation(conversationId, (prev) => ({
+          ...prev,
+          statusLine: `Agent unreachable. Reconnecting (${attempt}/${AGENT_RETRY_MAX_ATTEMPTS}) - retrying in ${retryInSec}s...`,
+        }));
+        await delayWithSignal(retryDelayMs, controller.signal);
+        continue;
+      }
+
+      const json = (await res.json().catch(() => null)) as unknown;
+      if (!res.ok) {
+        const apiError = parseApiError(json, res.status);
+        if (
+          isAgentUnreachableError(apiError.code, apiError.message) &&
+          attempt < AGENT_RETRY_MAX_ATTEMPTS
+        ) {
+          const retryDelayMs = Math.min(
+            AGENT_RETRY_MAX_DELAY_MS,
+            AGENT_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
+          );
+          const retryInSec = Math.max(1, Math.round(retryDelayMs / 1000));
+          updateConversation(conversationId, (prev) => ({
+            ...prev,
+            statusLine: `Agent unreachable. Reconnecting (${attempt}/${AGENT_RETRY_MAX_ATTEMPTS}) - retrying in ${retryInSec}s...`,
+          }));
+          await delayWithSignal(retryDelayMs, controller.signal);
+          continue;
+        }
+        throw new Error(apiError.message);
+      }
+
+      parsed = AiChatResponseSchema.parse(json);
+      break;
+    }
+
+    if (!parsed) {
+      throw new Error('Agent did not return a response after reconnect attempts.');
+    }
+
+    return parsed;
+  }
+
+  async function runPromptStreaming(
+    requestBody: Record<string, unknown>,
+    conversationId: string,
+    controller: AbortController,
+  ): Promise<ReturnType<typeof AiChatResponseSchema.parse>> {
+    let res: Response;
+    try {
+      res = await fetch('/api/ai/chat/stream', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') throw err;
+      throw new StreamUnsupportedError('Unable to establish stream connection.');
+    }
+
+    if (!res.ok) {
+      if (res.status === 404 || res.status === 405) {
+        throw new StreamUnsupportedError('Streaming endpoint is not available on this agent version.');
+      }
+      const json = (await res.json().catch(() => null)) as unknown;
+      const apiError = parseApiError(json, res.status);
+      throw new Error(apiError.message);
+    }
+    if (!res.body) {
+      throw new StreamUnsupportedError('Stream endpoint returned no body.');
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let gotAnyStreamEvent = false;
+    let finalResponse: ReturnType<typeof AiChatResponseSchema.parse> | null = null;
+
+    const handleEvent = (event: AiChatStreamEvent): void => {
+      gotAnyStreamEvent = true;
+      switch (event.type) {
+        case 'run_started':
+          appendLiveTrace(conversationId, `Run started (${event.provider} / ${event.model}).`);
+          updateConversation(conversationId, (prev) => ({
+            ...prev,
+            statusLine: 'Agent stream connected. Executing...',
+          }));
+          return;
+        case 'thinking':
+          appendLiveTrace(conversationId, `[${event.step}/${event.maxSteps}] ${event.message}`);
+          updateConversation(conversationId, (prev) => ({
+            ...prev,
+            statusLine: `Thinking (${event.step}/${event.maxSteps})...`,
+          }));
+          return;
+        case 'status':
+          appendLiveTrace(conversationId, event.message);
+          updateConversation(conversationId, (prev) => ({ ...prev, statusLine: event.message }));
+          return;
+        case 'tool_call_started':
+          appendLiveTrace(conversationId, `Tool ${event.name} started.`);
+          upsertConversationToolCall(conversationId, {
+            id: event.id,
+            name: event.name,
+            args: event.args,
+            ok: true,
+            summary: 'Running...',
+            error: null,
+            createdAt: event.createdAt,
+          });
+          return;
+        case 'tool_call_completed':
+          appendLiveTrace(
+            conversationId,
+            `Tool ${event.name} ${event.ok ? 'completed' : 'failed'}: ${event.summary}`,
+          );
+          upsertConversationToolCall(
+            conversationId,
+            {
+              id: event.id,
+              name: event.name,
+              args: event.args,
+              ok: event.ok,
+              summary: event.summary,
+              error: event.error,
+              createdAt: event.createdAt,
+            },
+            event.createdAt,
+          );
+          return;
+        case 'warning':
+          appendLiveTrace(conversationId, `Warning: ${event.message}`);
+          return;
+        case 'done':
+          finalResponse = AiChatResponseSchema.parse(event.response);
+          return;
+        case 'error':
+          throw new Error(event.error.message);
+      }
+    };
+
+    const consumeBlock = (block: string): void => {
+      const packet = parseSsePacket(block);
+      if (!packet) return;
+      let raw: unknown;
+      try {
+        raw = JSON.parse(packet.data) as unknown;
+      } catch {
+        return;
+      }
+      const parsedEvent = parseAiChatStreamEvent(raw);
+      if (!parsedEvent) return;
+      handleEvent(parsedEvent);
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true }).replaceAll('\r\n', '\n');
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary !== -1) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        consumeBlock(block);
+        boundary = buffer.indexOf('\n\n');
+      }
+    }
+
+    buffer += decoder.decode().replaceAll('\r\n', '\n');
+    const tail = buffer.trim();
+    if (tail) consumeBlock(tail);
+
+    if (finalResponse) return finalResponse;
+    if (!gotAnyStreamEvent) {
+      throw new StreamUnsupportedError('Agent stream ended without events.');
+    }
+    throw new Error('Agent stream ended before completion.');
+  }
+
   async function submitPrompt(sourcePrompt?: string): Promise<void> {
     const conversation = selectedConversation;
     const text = (sourcePrompt ?? prompt).trim();
@@ -727,6 +1227,8 @@ export function RunnerPanel() {
     );
     setPrompt('');
     setBusy(true);
+    setLiveTraceConversationId(conversationId);
+    setLiveTraceLines(['Connecting stream...']);
     runningConversationIdRef.current = conversationId;
 
     const maxStepsNum = Number.parseInt(conversation.maxSteps, 10);
@@ -750,119 +1252,19 @@ export function RunnerPanel() {
         })),
       };
 
-      let parsed: ReturnType<typeof AiChatResponseSchema.parse> | null = null;
-      for (let attempt = 1; attempt <= AGENT_RETRY_MAX_ATTEMPTS; attempt += 1) {
-        let res: Response;
-        try {
-          res = await fetch('/api/ai/chat', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(requestBody),
-            signal: controller.signal,
-          });
-        } catch (err) {
-          if (err instanceof DOMException && err.name === 'AbortError') throw err;
-          if (attempt >= AGENT_RETRY_MAX_ATTEMPTS) {
-            throw new Error(
-              `Agent is unreachable after ${AGENT_RETRY_MAX_ATTEMPTS} reconnect attempts. Start it with "pnpm dev" and retry.`,
-            );
-          }
-          const retryDelayMs = Math.min(
-            AGENT_RETRY_MAX_DELAY_MS,
-            AGENT_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
-          );
-          const retryInSec = Math.max(1, Math.round(retryDelayMs / 1000));
-          updateConversation(conversationId, (prev) => ({
-            ...prev,
-            statusLine: `Agent unreachable. Reconnecting (${attempt}/${AGENT_RETRY_MAX_ATTEMPTS}) - retrying in ${retryInSec}s...`,
-          }));
-          await delayWithSignal(retryDelayMs, controller.signal);
-          continue;
+      let parsed: ReturnType<typeof AiChatResponseSchema.parse>;
+      try {
+        parsed = await runPromptStreaming(requestBody, conversationId, controller);
+      } catch (err) {
+        if (err instanceof StreamUnsupportedError) {
+          appendLiveTrace(conversationId, 'Stream unavailable. Falling back to standard mode...');
+          parsed = await runPromptLegacy(requestBody, conversationId, controller);
+        } else {
+          throw err;
         }
-
-        const json = (await res.json().catch(() => null)) as unknown;
-        if (!res.ok) {
-          const apiError = parseApiError(json, res.status);
-          if (
-            isAgentUnreachableError(apiError.code, apiError.message) &&
-            attempt < AGENT_RETRY_MAX_ATTEMPTS
-          ) {
-            const retryDelayMs = Math.min(
-              AGENT_RETRY_MAX_DELAY_MS,
-              AGENT_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
-            );
-            const retryInSec = Math.max(1, Math.round(retryDelayMs / 1000));
-            updateConversation(conversationId, (prev) => ({
-              ...prev,
-              statusLine: `Agent unreachable. Reconnecting (${attempt}/${AGENT_RETRY_MAX_ATTEMPTS}) - retrying in ${retryInSec}s...`,
-            }));
-            await delayWithSignal(retryDelayMs, controller.signal);
-            continue;
-          }
-          throw new Error(apiError.message);
-        }
-
-        parsed = AiChatResponseSchema.parse(json);
-        break;
       }
 
-      if (!parsed) {
-        throw new Error('Agent did not return a response after reconnect attempts.');
-      }
-
-      const assistantMessage: ChatMessage = {
-        id: createId(),
-        role: 'assistant',
-        content: parsed.assistant.content,
-        createdAt: parsed.assistant.createdAt,
-      };
-      const diagnosticContent = buildAgentDiagnosticMessage({
-        status: parsed.status,
-        warnings: parsed.warnings,
-        toolCalls: parsed.toolCalls,
-      });
-      const diagnosticMessage: ChatMessage | null =
-        diagnosticContent ?
-          {
-            id: createId(),
-            role: 'assistant',
-            content: diagnosticContent,
-            createdAt: parsed.assistant.createdAt,
-          }
-        : null;
-
-      const lastTool = parsed.toolCalls.at(-1);
-      const failureCount = parsed.toolCalls.filter((call) => !call.ok).length;
-      const baseStatus =
-        parsed.status === 'completed'
-          ? 'Run complete.'
-          : 'Run hit max autonomous steps.';
-      updateConversation(
-        conversationId,
-        (prev) => ({
-          ...prev,
-          messages: diagnosticMessage ? [...prev.messages, assistantMessage, diagnosticMessage] : [...prev.messages, assistantMessage],
-          toolCalls: [
-            ...prev.toolCalls,
-            ...parsed.toolCalls.map((call) => ({
-              id: call.id,
-              name: call.name,
-              args: call.args,
-              ok: call.ok,
-              summary: call.summary,
-              error: call.error,
-              createdAt: parsed.assistant.createdAt,
-            })),
-          ],
-          statusLine:
-            failureCount > 0 ?
-              `${baseStatus} ${failureCount} tool call${failureCount === 1 ? '' : 's'} failed.`
-            : lastTool ?
-              `${baseStatus} Last action: ${lastTool.summary}`
-            : baseStatus,
-        }),
-        parsed.assistant.createdAt,
-      );
+      applyCompletedRun(conversationId, parsed);
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         updateConversation(conversationId, (prev) => ({ ...prev, statusLine: 'Run paused.' }));
@@ -882,14 +1284,18 @@ export function RunnerPanel() {
             : `Agent log\n- Run failed before completion: ${errorText}`,
           createdAt: now,
         };
-        updateConversation(conversationId, (prev) => ({
-          ...prev,
-          messages: [...prev.messages, errorMessage],
-          statusLine:
-            isUnreachable ?
-              'Agent disconnected. Start it and press Run to resume this prompt.'
-            : errorText,
-        }), now);
+        updateConversation(
+          conversationId,
+          (prev) => ({
+            ...prev,
+            messages: [...prev.messages, errorMessage],
+            statusLine:
+              isUnreachable ?
+                'Agent disconnected. Start it and press Run to resume this prompt.'
+              : errorText,
+          }),
+          now,
+        );
       }
     } finally {
       if (abortRef.current === controller) {
@@ -898,6 +1304,7 @@ export function RunnerPanel() {
       if (runningConversationIdRef.current === conversationId) {
         runningConversationIdRef.current = null;
       }
+      clearLiveTrace(conversationId);
       setBusy(false);
     }
   }
@@ -913,6 +1320,7 @@ export function RunnerPanel() {
     const targetConversationId = runningConversationIdRef.current ?? selectedConversation?.id ?? null;
     if (targetConversationId) {
       updateConversation(targetConversationId, (prev) => ({ ...prev, statusLine: 'Agent stopped.' }));
+      clearLiveTrace(targetConversationId);
     }
     runningConversationIdRef.current = null;
   }
@@ -1183,6 +1591,15 @@ export function RunnerPanel() {
                     </span>
                     <span className="text-[13px]">Thinking…</span>
                   </div>
+                  {visibleLiveTrace.length > 0 ? (
+                    <div className="mt-2 space-y-1 text-[12px] text-[color:var(--cs-muted)]">
+                      {visibleLiveTrace.map((line, idx) => (
+                        <div key={`${idx}_${line}`} className="break-words">
+                          {line}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>

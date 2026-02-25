@@ -929,6 +929,68 @@ export const AiChatResponseSchema = z.object({
 
 export type AiChatResponse = z.infer<typeof AiChatResponseSchema>;
 
+export const AiChatStreamEventSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('run_started'),
+    createdAt: z.string(),
+    mode: AiAgentModeSchema,
+    provider: AiProviderSchema,
+    model: z.string(),
+    maxSteps: z.number().int().min(1).max(500),
+  }),
+  z.object({
+    type: z.literal('thinking'),
+    createdAt: z.string(),
+    step: z.number().int().min(1),
+    maxSteps: z.number().int().min(1).max(500),
+    message: z.string(),
+  }),
+  z.object({
+    type: z.literal('status'),
+    createdAt: z.string(),
+    message: z.string(),
+  }),
+  z.object({
+    type: z.literal('tool_call_started'),
+    createdAt: z.string(),
+    step: z.number().int().min(1),
+    id: z.string(),
+    name: z.string(),
+    args: z.record(z.string(), z.unknown()),
+  }),
+  z.object({
+    type: z.literal('tool_call_completed'),
+    createdAt: z.string(),
+    step: z.number().int().min(1),
+    id: z.string(),
+    name: z.string(),
+    args: z.record(z.string(), z.unknown()),
+    ok: z.boolean(),
+    summary: z.string(),
+    error: z.string().nullable().default(null),
+  }),
+  z.object({
+    type: z.literal('warning'),
+    createdAt: z.string(),
+    message: z.string(),
+  }),
+  z.object({
+    type: z.literal('done'),
+    createdAt: z.string(),
+    response: AiChatResponseSchema,
+  }),
+  z.object({
+    type: z.literal('error'),
+    createdAt: z.string(),
+    error: z.object({
+      code: z.string(),
+      message: z.string(),
+    }),
+  }),
+]);
+
+export type AiChatStreamEvent = z.infer<typeof AiChatStreamEventSchema>;
+
 export const AgentEventSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('hello'),

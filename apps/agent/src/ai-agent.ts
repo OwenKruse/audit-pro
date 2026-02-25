@@ -113,6 +113,52 @@ type OpenAiConversationMessage =
       content: string;
     };
 
+type AiChatProgressEvent =
+  | {
+      type: 'run_started';
+      createdAt: string;
+      mode: AiChatRequest['mode'];
+      provider: AiProvider;
+      model: string;
+      maxSteps: number;
+    }
+  | {
+      type: 'thinking';
+      createdAt: string;
+      step: number;
+      maxSteps: number;
+      message: string;
+    }
+  | {
+      type: 'status';
+      createdAt: string;
+      message: string;
+    }
+  | {
+      type: 'tool_call_started';
+      createdAt: string;
+      step: number;
+      id: string;
+      name: string;
+      args: Record<string, unknown>;
+    }
+  | {
+      type: 'tool_call_completed';
+      createdAt: string;
+      step: number;
+      id: string;
+      name: string;
+      args: Record<string, unknown>;
+      ok: boolean;
+      summary: string;
+      error: string | null;
+    }
+  | {
+      type: 'warning';
+      createdAt: string;
+      message: string;
+    };
+
 type RunAiAgentChatInput = {
   db: DatabaseSync;
   request: AiChatRequest;
@@ -129,6 +175,7 @@ type RunAiAgentChatInput = {
     payload?: unknown;
   }) => Promise<{ statusCode: number; body: unknown }>;
   fetchImpl?: typeof fetch;
+  onProgress?: (event: AiChatProgressEvent) => void;
 };
 
 type ToolContext = {
@@ -4453,6 +4500,16 @@ function buildMaxStepSummary(toolCalls: AiChatResponse['toolCalls']): string {
 }
 
 export async function runAiAgentChat(input: RunAiAgentChatInput): Promise<AiChatResponse> {
+  const emitProgress = (event: AiChatProgressEvent): void => {
+    if (!input.onProgress) return;
+    try {
+      input.onProgress(event);
+    } catch {
+      // Progress callbacks must never break execution.
+    }
+  };
+  const nowIso = (): string => new Date().toISOString();
+
   const fetchImpl = input.fetchImpl ?? fetch;
   const temperatureOverride =
     parseOptionalFloat(process.env.AI_TEMPERATURE) ?? parseOptionalFloat(process.env.OPENAI_TEMPERATURE);
@@ -4476,7 +4533,25 @@ export async function runAiAgentChat(input: RunAiAgentChatInput): Promise<AiChat
   let status: AiChatResponse['status'] = 'completed';
   let autonomyNudges = 0;
 
+  emitProgress({
+    type: 'run_started',
+    createdAt: nowIso(),
+    mode: input.request.mode,
+    provider: input.aiProvider,
+    model: input.aiModel,
+    maxSteps: input.request.maxSteps,
+  });
+
   for (let step = 0; step < input.request.maxSteps; step += 1) {
+    const stepNumber = step + 1;
+    emitProgress({
+      type: 'thinking',
+      createdAt: nowIso(),
+      step: stepNumber,
+      maxSteps: input.request.maxSteps,
+      message: `Planning step ${stepNumber}/${input.request.maxSteps}...`,
+    });
+
     let result: { model: string; message: OpenAiAssistantMessage } | null = null;
     try {
       result =
@@ -4508,7 +4583,9 @@ export async function runAiAgentChat(input: RunAiAgentChatInput): Promise<AiChat
         input.aiModel === 'gpt-5-nano-2025-08-07'
       ) {
         const fallback = FALLBACK_OPENAI_MODELS[0];
-        warnings.push(`OpenAI model "${input.aiModel}" failed (${err.status}); retrying with "${fallback}".`);
+        const warning = `OpenAI model "${input.aiModel}" failed (${err.status}); retrying with "${fallback}".`;
+        warnings.push(warning);
+        emitProgress({ type: 'warning', createdAt: nowIso(), message: warning });
         result = await callOpenAiChat({
           apiKey: input.aiApiKey,
           model: fallback,
@@ -4528,6 +4605,16 @@ export async function runAiAgentChat(input: RunAiAgentChatInput): Promise<AiChat
     finalModel = result.model;
     const assistant = result.message;
     const assistantContent = parseAssistantContent(assistant.content);
+    const assistantPreview = assistantContent.trim();
+    if (assistantPreview) {
+      emitProgress({
+        type: 'thinking',
+        createdAt: nowIso(),
+        step: stepNumber,
+        maxSteps: input.request.maxSteps,
+        message: truncate(assistantPreview, 220),
+      });
+    }
     const calls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
     conversation.push(
       calls.length
@@ -4549,6 +4636,11 @@ export async function runAiAgentChat(input: RunAiAgentChatInput): Promise<AiChat
       const canNudge = step + 1 < input.request.maxSteps && autonomyNudges < 1 && hasNextActions && hasBullets;
       if (canNudge) {
         autonomyNudges += 1;
+        emitProgress({
+          type: 'status',
+          createdAt: nowIso(),
+          message: 'Continuing autonomously from Next Actions...',
+        });
         conversation.push({
           role: 'user',
           content:
@@ -4566,6 +4658,14 @@ export async function runAiAgentChat(input: RunAiAgentChatInput): Promise<AiChat
       const callId = typeof call.id === 'string' && call.id ? call.id : randomUUID();
       const toolName = typeof call.function?.name === 'string' ? call.function.name : 'unknown_tool';
       const args = parseToolArgs(call.function?.arguments);
+      emitProgress({
+        type: 'tool_call_started',
+        createdAt: nowIso(),
+        step: stepNumber,
+        id: callId,
+        name: toolName,
+        args,
+      });
 
       try {
         const executed = await executeTool(toolName, args, {
@@ -4577,6 +4677,17 @@ export async function runAiAgentChat(input: RunAiAgentChatInput): Promise<AiChat
         });
 
         toolCalls.push({
+          id: callId,
+          name: toolName,
+          args,
+          ok: true,
+          summary: executed.summary,
+          error: null,
+        });
+        emitProgress({
+          type: 'tool_call_completed',
+          createdAt: nowIso(),
+          step: stepNumber,
           id: callId,
           name: toolName,
           args,
@@ -4601,6 +4712,22 @@ export async function runAiAgentChat(input: RunAiAgentChatInput): Promise<AiChat
           error: message,
         });
         warnings.push(`Tool ${toolName} failed: ${message}`);
+        emitProgress({
+          type: 'tool_call_completed',
+          createdAt: nowIso(),
+          step: stepNumber,
+          id: callId,
+          name: toolName,
+          args,
+          ok: false,
+          summary: `Tool failed: ${message}`,
+          error: message,
+        });
+        emitProgress({
+          type: 'warning',
+          createdAt: nowIso(),
+          message: `Tool ${toolName} failed: ${message}`,
+        });
         conversation.push({
           role: 'tool',
           tool_call_id: callId,
@@ -4613,6 +4740,11 @@ export async function runAiAgentChat(input: RunAiAgentChatInput): Promise<AiChat
   if (!finalContent) {
     status = 'max_steps';
     finalContent = buildMaxStepSummary(toolCalls);
+    emitProgress({
+      type: 'status',
+      createdAt: nowIso(),
+      message: 'Run hit the max autonomous step limit.',
+    });
   }
 
   return {
