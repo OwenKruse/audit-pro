@@ -595,10 +595,11 @@ export async function createFoundryManager(
     } else {
       const binaryResolution = await resolveBinary(config.binary);
       resolvedBinary = binaryResolution.resolvedBinary;
-      const forkCandidates =
+      const forkCandidates: Array<string | null> =
         config.forkUrl ?
-          uniqueStrings([config.forkUrl, ...config.forkFallbackUrls])
+          [...uniqueStrings([config.forkUrl, ...config.forkFallbackUrls]), null]
         : [null];
+      let lastForkFailure: string | null = null;
 
       for (let i = 0; i < forkCandidates.length; i += 1) {
         const forkUrlCandidate = forkCandidates[i] ?? null;
@@ -607,6 +608,7 @@ export async function createFoundryManager(
           const probe = await probeForkRpcEndpoint(forkUrlCandidate);
           if (!probe.ok) {
             startupError = `Fork RPC preflight failed for ${forkUrlCandidate}: ${probe.reason}`;
+            lastForkFailure = startupError;
             log.warn(
               { forkUrl: forkUrlCandidate, reason: probe.reason },
               'skipping fork rpc candidate after failed preflight',
@@ -620,13 +622,20 @@ export async function createFoundryManager(
           forkBlockNumber: forkUrlCandidate ? config.forkBlockNumber : null,
         };
 
-        if (isRetry) {
+        if (isRetry && forkUrlCandidate) {
           log.warn(
             {
               previousError: startupError,
               retryForkUrl: forkUrlCandidate,
             },
             'retrying foundry startup with fallback fork rpc',
+          );
+        } else if (isRetry && !forkUrlCandidate) {
+          log.warn(
+            {
+              previousError: startupError,
+            },
+            'retrying foundry startup without fork after fork rpc failures',
           );
         }
 
@@ -635,6 +644,9 @@ export async function createFoundryManager(
         managed = attempt.managed;
         running = attempt.running;
         startupError = attempt.startupError;
+        if (!running && forkUrlCandidate) {
+          lastForkFailure = startupError;
+        }
 
         if (running && child) {
           effectiveForkUrl = forkUrlCandidate;
@@ -642,6 +654,11 @@ export async function createFoundryManager(
             log.warn(
               { forkUrl: forkUrlCandidate, originalForkUrl: config.forkUrl },
               'foundry started using fallback fork rpc',
+            );
+          } else if (!forkUrlCandidate && config.forkUrl) {
+            log.warn(
+              { originalForkUrl: config.forkUrl, previousError: lastForkFailure },
+              'foundry started without fork after fork rpc failures',
             );
           }
           break;

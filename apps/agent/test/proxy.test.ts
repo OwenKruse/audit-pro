@@ -181,4 +181,84 @@ describe('proxy capture', () => {
     await close();
     upstream.close();
   });
+
+  it('rewrites non-loopback EVM JSON-RPC requests to the configured local rpc url', async () => {
+    const previousRewriteUrl = process.env.AGENT_PROXY_RPC_REWRITE_URL;
+    const previousRewriteEnabled = process.env.AGENT_PROXY_RPC_REWRITE_ENABLED;
+
+    let receivedMethod: string | null = null;
+    const localRpc = http.createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      await new Promise<void>((resolve) => req.on('end', () => resolve()));
+      const raw = Buffer.concat(chunks).toString('utf8');
+      let parsed: { method?: unknown } = {};
+      try {
+        parsed = JSON.parse(raw) as { method?: unknown };
+      } catch {
+        parsed = {};
+      }
+      receivedMethod = typeof parsed.method === 'string' ? parsed.method : null;
+
+      res.statusCode = 200;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: true, rewritten: true, path: req.url ?? null }));
+    });
+    const localRpcPort = await listen(localRpc);
+
+    process.env.AGENT_PROXY_RPC_REWRITE_ENABLED = '1';
+    process.env.AGENT_PROXY_RPC_REWRITE_URL = `http://127.0.0.1:${localRpcPort}/evm/jsonrpc`;
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cipherscope-agent-'));
+    const dbPath = path.join(tmpDir, 'agent.db');
+    const { app, close } = await buildApp({
+      dbPath,
+      agentName: 'cipherscope-agent',
+      agentVersion: '0.0.0-test',
+      proxyHost: '127.0.0.1',
+      proxyPort: 0,
+    });
+
+    try {
+      const proxyStatus = ProxyStatusSchema.parse(
+        (await app.inject({ method: 'GET', url: '/proxy/status' })).json(),
+      );
+      const proxyPort = proxyStatus.proxy.port as number;
+
+      const targetUrl = 'http://rpc.unreachable.invalid/mainnet';
+      const resp = await requestViaProxy({
+        proxyPort,
+        targetUrl,
+        method: 'POST',
+        headers: {
+          host: 'rpc.unreachable.invalid',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'eth_chainId',
+          params: [],
+        }),
+      });
+
+      expect(resp.statusCode).toBe(200);
+      expect(resp.body).toContain('"rewritten":true');
+      expect(receivedMethod).toBe('eth_chainId');
+
+      const list = ListMessagesResponseSchema.parse(
+        (await app.inject({ method: 'GET', url: '/messages?limit=20&offset=0' })).json(),
+      );
+      const found = list.items.find((m) => m.host === 'rpc.unreachable.invalid' && m.path === '/mainnet');
+      if (!found) throw new Error('Expected captured rpc attempt was not found.');
+      expect(found.responseStatus).toBe(200);
+    } finally {
+      await close();
+      localRpc.close();
+      if (previousRewriteEnabled == null) delete process.env.AGENT_PROXY_RPC_REWRITE_ENABLED;
+      else process.env.AGENT_PROXY_RPC_REWRITE_ENABLED = previousRewriteEnabled;
+      if (previousRewriteUrl == null) delete process.env.AGENT_PROXY_RPC_REWRITE_URL;
+      else process.env.AGENT_PROXY_RPC_REWRITE_URL = previousRewriteUrl;
+    }
+  });
 });

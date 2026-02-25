@@ -134,7 +134,7 @@ High-impact variables:
 | ---------------- | ----------------------------------------------------------------------------------------------------- |
 | UI agent routing | `AGENT_HTTP_URL`, `NEXT_PUBLIC_AGENT_WS_URL`                                                          |
 | Agent listener   | `AGENT_HOST`, `AGENT_PORT`                                                                            |
-| Proxy listener   | `AGENT_PROXY_HOST`, `AGENT_PROXY_PORT`, `AGENT_MITM_ENABLED`, `AGENT_UPSTREAM_INSECURE`               |
+| Proxy listener   | `AGENT_PROXY_HOST`, `AGENT_PROXY_PORT`, `AGENT_PROXY_RPC_REWRITE_ENABLED`, `AGENT_PROXY_RPC_REWRITE_URL`, `AGENT_MITM_ENABLED`, `AGENT_UPSTREAM_INSECURE` |
 | Persistence      | `AGENT_DB_PATH`, `LOG_LEVEL`                                                                          |
 | Foundry/Anvil    | `AGENT_FOUNDRY_*`                                                                                     |
 | AI provider      | `OPENAI_*`, `OPENROUTER_*`, `GEMINI_*`, `GROK_*`/`XAI_*`, `CLAUDE_*`/`ANTHROPIC_*`, `DEEPSEEK_*`      |

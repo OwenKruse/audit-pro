@@ -64,7 +64,7 @@ import {
 import { createFinding, listFindings, updateFinding } from './findings.js';
 import { runContractAudit } from './contract-audit.js';
 import { listScannerFindings, runScanner } from './scanner.js';
-import { runAiAgentChat } from './ai-agent.js';
+import { closeAiAgentResources, runAiAgentChat } from './ai-agent.js';
 import { getRpcInteraction, listRpcInteractions, recordRpcInteraction } from './rpc-history.js';
 import { ProjectManager } from './projects.js';
 import { runDexExplorerQuery } from './explorer.js';
@@ -150,22 +150,6 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
     } as AgentEvent);
   }, 1000);
 
-  const proxyCaptureSettings = getProxyCaptureSettings(projects.db());
-  const proxy = new ProxyController({
-    host: opts.proxyHost,
-    port: opts.proxyPort,
-    tlsDir,
-    mitmEnabled,
-    upstreamInsecure,
-    ignoredHosts: proxyCaptureSettings.ignoredHosts,
-    getDb: () => projects.db(),
-    metrics,
-    log: app.log,
-    publishEvent,
-  });
-
-  await proxy.start();
-
   const loadForkOverrides = () => {
     const saved = getEvmForkSettings(projects.db());
     return saved.hasSavedConfig
@@ -174,6 +158,30 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
   };
 
   let foundry = await createFoundryManager(app.log, { overrides: loadForkOverrides() });
+
+  const proxyRpcRewriteEnabled = (process.env.AGENT_PROXY_RPC_REWRITE_ENABLED ?? '1') !== '0';
+  const proxyRpcRewriteUrl = (process.env.AGENT_PROXY_RPC_REWRITE_URL ?? '').trim() || null;
+  const proxyCaptureSettings = getProxyCaptureSettings(projects.db());
+  const proxy = new ProxyController({
+    host: opts.proxyHost,
+    port: opts.proxyPort,
+    tlsDir,
+    mitmEnabled,
+    upstreamInsecure,
+    rpcAutoRewriteEnabled: proxyRpcRewriteEnabled,
+    rpcRewriteUrl: proxyRpcRewriteUrl,
+    resolveRpcRewriteUrl: () => {
+      const st = foundry.status();
+      return st.running ? st.rpcUrl : null;
+    },
+    ignoredHosts: proxyCaptureSettings.ignoredHosts,
+    getDb: () => projects.db(),
+    metrics,
+    log: app.log,
+    publishEvent,
+  });
+
+  await proxy.start();
 
   const readNodeInfo = async (): Promise<unknown | null> => {
     try {
@@ -492,6 +500,107 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
     }
   });
 
+  const walletStateQueryMethods = new Set([
+    'eth_getBalance',
+    'eth_getTransactionCount',
+    'eth_getCode',
+    'eth_getStorageAt',
+    'eth_call',
+  ]);
+
+  const isGenesisBlockTag = (value: unknown): boolean => {
+    if (typeof value === 'number') return Number.isFinite(value) && value === 0;
+    if (typeof value === 'bigint') return value === BigInt(0);
+    if (typeof value !== 'string') return false;
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return false;
+    if (normalized === 'earliest') return true;
+    if (/^0x[0-9a-f]+$/.test(normalized)) {
+      try {
+        return BigInt(normalized) === BigInt(0);
+      } catch {
+        return false;
+      }
+    }
+    if (/^\d+$/.test(normalized)) {
+      try {
+        return BigInt(normalized) === BigInt(0);
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  };
+
+  const normalizeWalletStateQueryParams = (method: string, params: unknown[]): void => {
+    if (!walletStateQueryMethods.has(method) || params.length < 2) return;
+    const blockTagIndex = params.length - 1;
+    if (isGenesisBlockTag(params[blockTagIndex])) {
+      params[blockTagIndex] = 'latest';
+    }
+  };
+
+  // Standard JSON-RPC 2.0 endpoint for wallet connections (MetaMask, Rabby, etc.).
+  // Accepts the Ethereum JSON-RPC 2.0 wire format and proxies to the managed Anvil instance.
+  // Exposes CORS headers so browser extensions can reach it over HTTP without cert issues.
+  app.options('/evm/jsonrpc', async (_req, reply) => {
+    reply.header('access-control-allow-origin', '*');
+    reply.header('access-control-allow-methods', 'POST, OPTIONS');
+    reply.header('access-control-allow-headers', 'content-type');
+    reply.code(204);
+    return '';
+  });
+
+  app.post('/evm/jsonrpc', async (req, reply) => {
+    reply.header('access-control-allow-origin', '*');
+    reply.header('access-control-allow-methods', 'POST, OPTIONS');
+    reply.header('access-control-allow-headers', 'content-type');
+    reply.header('cache-control', 'no-store');
+
+    const body = req.body as { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: unknown } | null;
+    const id = body?.id ?? null;
+    const method = typeof body?.method === 'string' ? body.method.trim() : '';
+
+    if (!method) {
+      reply.code(400);
+      return { jsonrpc: '2.0', id, error: { code: -32600, message: 'Invalid Request: method is required' } };
+    }
+
+    const paramsRaw = body?.params;
+    const params =
+      paramsRaw == null ? [] : Array.isArray(paramsRaw) ? paramsRaw : [paramsRaw];
+
+    // Wallets (Rabby, MetaMask) sometimes query state at genesis/earliest block tags.
+    // On a forked Anvil, balance/code mutations are applied at the current head, so
+    // normalize genesis-style tags to "latest" for state query methods.
+    normalizeWalletStateQueryParams(method, params);
+
+    app.log.info({ method, params: JSON.stringify(params).slice(0, 120) }, 'wallet jsonrpc call');
+    // #region agent log
+    fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'agent/app.ts:/evm/jsonrpc:request',message:'wallet jsonrpc request',data:{method,firstParam:params[0] ?? null,paramCount:params.length},timestamp:Date.now(),hypothesisId:'H-I,H-J'})}).catch(()=>{});
+    // #endregion
+
+    try {
+      const result = await foundry.rpcCall<unknown>(method, params);
+      if (method === 'eth_getBalance' || method === 'eth_accounts' || method === 'eth_chainId') {
+        // #region agent log
+        fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'agent/app.ts:/evm/jsonrpc:result',message:'wallet jsonrpc result',data:{method,result:String(result).slice(0,120),firstParam:params[0] ?? null},timestamp:Date.now(),hypothesisId:'H-I,H-J'})}).catch(()=>{});
+        // #endregion
+      }
+      return { jsonrpc: '2.0', id, result: result ?? null };
+    } catch (err) {
+      if (err instanceof FoundryRpcError) {
+        return { jsonrpc: '2.0', id, error: { code: err.code, message: err.message, data: err.data ?? undefined } };
+      }
+      reply.code(503);
+      return {
+        jsonrpc: '2.0',
+        id,
+        error: { code: -32603, message: err instanceof Error ? err.message : String(err) },
+      };
+    }
+  });
+
   app.post('/evm/rpc', async (req, reply) => {
     const body = req.body as { method?: unknown; params?: unknown } | null;
     const method = typeof body?.method === 'string' ? body.method.trim() : '';
@@ -510,6 +619,10 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
         : Array.isArray(paramsRaw)
           ? paramsRaw
           : [paramsRaw];
+
+    // Keep /evm/rpc behavior aligned with /evm/jsonrpc so wallet RPC proxy routes
+    // receive consistent state-query block-tag normalization.
+    normalizeWalletStateQueryParams(method, params);
 
     try {
       const result = await foundry.rpcCall<unknown>(method, params);
@@ -1768,6 +1881,7 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
       clearInterval(metricsInterval);
       await proxy.stop();
       await foundry.stop();
+      await closeAiAgentResources();
       await app.close();
       projects.closeAll();
     },

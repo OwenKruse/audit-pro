@@ -35,7 +35,23 @@ import { getZapScan, listZapScans, startZapScan, stopZapScan } from './zap-scans
 import { runSubfinder } from './subfinder.js';
 import { recordPassedShodanSearch } from './shodan-searches.js';
 import { searchPayloadCatalog } from './payload-catalog.js';
-import { IntruderAttackRequestSchema, runIntruderAttack } from './intruder.js';
+import {
+  IntruderAttackRequestSchema,
+  isIntruderInputError,
+  type IntruderAttackRequest,
+  runIntruderAttack,
+} from './intruder.js';
+import {
+  clickPage,
+  closeBrowserAutomation,
+  evaluatePageJs,
+  extractPageDom,
+  extractPageText,
+  gotoPage,
+  screenshotPage,
+  typeIntoPage,
+  waitForPage,
+} from './browser-automation.js';
 
 type ToolCall = {
   id: string;
@@ -369,6 +385,76 @@ const RpcRequestArgsSchema = z.object({
   allowSideEffects: z.boolean().optional(),
 });
 
+const BrowserSessionArgsSchema = z.string().trim().min(1).max(120).optional();
+
+const BrowserGotoArgsSchema = z.object({
+  session: BrowserSessionArgsSchema,
+  url: z.string().trim().min(1).max(4096),
+  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+  waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle', 'commit']).optional(),
+});
+
+const BrowserClickArgsSchema = z.object({
+  session: BrowserSessionArgsSchema,
+  selector: z.string().trim().min(1).max(1024),
+  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+  button: z.enum(['left', 'middle', 'right']).optional(),
+  clickCount: z.number().int().min(1).max(20).optional(),
+  delayMs: z.number().int().min(0).max(3000).optional(),
+});
+
+const BrowserTypeArgsSchema = z.object({
+  session: BrowserSessionArgsSchema,
+  selector: z.string().trim().min(1).max(1024),
+  text: z.string().max(100_000),
+  clear: z.boolean().optional(),
+  delayMs: z.number().int().min(0).max(500).optional(),
+  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+  pressEnter: z.boolean().optional(),
+});
+
+const BrowserWaitForArgsSchema = z.object({
+  session: BrowserSessionArgsSchema,
+  selector: z.string().trim().min(1).max(1024),
+  state: z.enum(['attached', 'detached', 'visible', 'hidden']).optional(),
+  timeoutMs: z.number().int().min(50).max(120_000).optional(),
+});
+
+const BrowserEvaluateJsArgsSchema = z.object({
+  session: BrowserSessionArgsSchema,
+  script: z.string().trim().min(1).max(200_000),
+  timeoutMs: z.number().int().min(50).max(120_000).optional(),
+});
+
+const BrowserExtractTextArgsSchema = z.object({
+  session: BrowserSessionArgsSchema,
+  selector: z.string().trim().min(1).max(1024),
+  all: z.boolean().optional(),
+  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+  maxChars: z.number().int().min(100).max(500_000).optional(),
+  maxItems: z.number().int().min(1).max(2000).optional(),
+  trim: z.boolean().optional(),
+});
+
+const BrowserExtractDomArgsSchema = z.object({
+  session: BrowserSessionArgsSchema,
+  selector: z.string().trim().min(1).max(1024).optional(),
+  outerHtml: z.boolean().optional(),
+  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+  maxChars: z.number().int().min(100).max(600_000).optional(),
+});
+
+const BrowserScreenshotArgsSchema = z.object({
+  session: BrowserSessionArgsSchema,
+  selector: z.string().trim().min(1).max(1024).optional(),
+  fullPage: z.boolean().optional(),
+  path: z.string().trim().min(1).max(4096).optional(),
+  type: z.enum(['png', 'jpeg']).optional(),
+  quality: z.number().int().min(1).max(100).optional(),
+  timeoutMs: z.number().int().min(100).max(120_000).optional(),
+  omitBackground: z.boolean().optional(),
+});
+
 const PositiveIntLikeSchema = z.union([
   z.number().int().positive(),
   z.string().trim().regex(/^\d+$/).transform((v) => Number(v)),
@@ -428,6 +514,44 @@ const ManageFoundryEnvironmentArgsSchema = z.discriminatedUnion('action', [
 ]);
 
 const FALLBACK_OPENAI_MODELS = ['gpt-4o-mini'] as const;
+
+const DEFAULT_INTRUDER_FALLBACK_PAYLOADS = [
+  "'",
+  '"',
+  '`',
+  '../',
+  '../../etc/passwd',
+  '<script>alert(1)</script>',
+  '{{7*7}}',
+  '${7*7}',
+  '1 OR 1=1',
+  "1' OR '1'='1",
+  '%00',
+] as const;
+
+function hasNonEmptyIntruderPayloadSets(payloadSets: IntruderAttackRequest['payloadSets']): boolean {
+  if (!Array.isArray(payloadSets) || payloadSets.length === 0) return false;
+  for (const set of payloadSets) {
+    if (!Array.isArray(set) || set.length === 0) continue;
+    for (const value of set) {
+      if (typeof value === 'string' && value.trim().length > 0) return true;
+    }
+  }
+  return false;
+}
+
+function hasIntruderPayloadQueries(payloadSetQueries: IntruderAttackRequest['payloadSetQueries']): boolean {
+  return Array.isArray(payloadSetQueries) && payloadSetQueries.length > 0;
+}
+
+function buildDefaultIntruderCatalogQuery(maxRequests: number | undefined) {
+  const base = typeof maxRequests === 'number' && Number.isFinite(maxRequests) ? Math.trunc(maxRequests) : 120;
+  const limit = Math.max(20, Math.min(300, base));
+  return {
+    sourceType: 'intruder' as const,
+    limit,
+  };
+}
 
 const OPENAI_TOOLS = [
   {
@@ -809,7 +933,7 @@ const OPENAI_TOOLS = [
     function: {
       name: 'run_intruder_attack',
       description:
-        'Run a Burp-style intruder attack against an HTTP request template using §...§ payload positions.',
+        'Run a Burp-style intruder attack against an HTTP request template using §...§ payload positions. Provide payloadSets or payloadSetQueries; if omitted, the agent applies fallback payload sources.',
       parameters: {
         type: 'object',
         properties: {
@@ -985,6 +1109,160 @@ const OPENAI_TOOLS = [
           noCache: { type: 'boolean' },
         },
         required: ['url'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'goto',
+      description: 'Open a URL in a headless Chromium browser session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session: { type: 'string' },
+          url: { type: 'string' },
+          timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 },
+          waitUntil: { type: 'string', enum: ['load', 'domcontentloaded', 'networkidle', 'commit'] },
+        },
+        required: ['url'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'click',
+      description: 'Click an element in the active Playwright browser session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session: { type: 'string' },
+          selector: { type: 'string' },
+          timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 },
+          button: { type: 'string', enum: ['left', 'middle', 'right'] },
+          clickCount: { type: 'integer', minimum: 1, maximum: 20 },
+          delayMs: { type: 'integer', minimum: 0, maximum: 3000 },
+        },
+        required: ['selector'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'type',
+      description: 'Type text into an element in the active Playwright browser session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session: { type: 'string' },
+          selector: { type: 'string' },
+          text: { type: 'string' },
+          clear: { type: 'boolean' },
+          delayMs: { type: 'integer', minimum: 0, maximum: 500 },
+          timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 },
+          pressEnter: { type: 'boolean' },
+        },
+        required: ['selector', 'text'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'wait_for',
+      description: 'Wait for a selector state in the active Playwright browser session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session: { type: 'string' },
+          selector: { type: 'string' },
+          state: { type: 'string', enum: ['attached', 'detached', 'visible', 'hidden'] },
+          timeoutMs: { type: 'integer', minimum: 50, maximum: 120000 },
+        },
+        required: ['selector'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'evaluate_js',
+      description: 'Evaluate JavaScript in the current browser page context.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session: { type: 'string' },
+          script: { type: 'string' },
+          timeoutMs: { type: 'integer', minimum: 50, maximum: 120000 },
+        },
+        required: ['script'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'extract_text',
+      description: 'Extract text content for a selector from the browser page.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session: { type: 'string' },
+          selector: { type: 'string' },
+          all: { type: 'boolean' },
+          timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 },
+          maxChars: { type: 'integer', minimum: 100, maximum: 500000 },
+          maxItems: { type: 'integer', minimum: 1, maximum: 2000 },
+          trim: { type: 'boolean' },
+        },
+        required: ['selector'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'extract_dom',
+      description: 'Extract DOM HTML from the browser page (full page or a selector).',
+      parameters: {
+        type: 'object',
+        properties: {
+          session: { type: 'string' },
+          selector: { type: 'string' },
+          outerHtml: { type: 'boolean' },
+          timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 },
+          maxChars: { type: 'integer', minimum: 100, maximum: 600000 },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'screenshot',
+      description: 'Capture a screenshot from the active browser page or a specific element.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session: { type: 'string' },
+          selector: { type: 'string' },
+          fullPage: { type: 'boolean' },
+          path: { type: 'string' },
+          type: { type: 'string', enum: ['png', 'jpeg'] },
+          quality: { type: 'integer', minimum: 1, maximum: 100 },
+          timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 },
+          omitBackground: { type: 'boolean' },
+        },
         additionalProperties: false,
       },
     },
@@ -2646,6 +2924,7 @@ If instructed to "investigate" or "analyze" a target without specific parameters
     - \`search_zoomeye_hosts\`: \`q\` must be ZoomEye DSL (field="value" with optional &&/||), never a natural-language sentence. If it returns "Invalid query", rewrite \`q\` into ZoomEye DSL and retry once with a simpler expression.
     - \`search_shodan_hosts\`: \`q\` must use Shodan query syntax with filters (e.g., \`apache country:US\` or \`product:nginx port:443\`).
 - **Web Content:** Use \`get_webpage_markdown\` for web docs/blogs/references to get clean markdown content for reasoning.
+- **Browser Automation:** For JavaScript-rendered pages use \`goto\`, \`click\`, \`type\`, \`wait_for\`, \`evaluate_js\`, \`extract_text\`, \`extract_dom\`, and \`screenshot\` in sequence.
 - **EVM State:** Use \`manage_foundry_environment\` to control chain/fork config and basic Foundry/anvil operations.
 - **HTTP/Web Probing:** Use \`repeater_request\` for stateful HTTP exploration (set once, send many) and \`http_request\` for one-off curl-like checks. Pass headers via a headers object or curl-style header lines (example: \`["Authorization: Bearer <token>"]\`).
 
@@ -2661,6 +2940,7 @@ Your internal reasoning and tool execution loop should be highly verbose and mul
 - **Next Actions:** Only manual steps, required approvals, or unavailable tool requests.`;
 
 function buildSystemPrompt(_mode: AiChatRequest['mode']): string {
+  void _mode;
   return SYSTEM_PROMPT;
 }
 
@@ -3328,7 +3608,50 @@ async function executeTool(
     }
     case 'run_intruder_attack': {
       const parsed = IntruderAttackRequestSchema.parse(args);
-      const out = await runIntruderAttack(parsed);
+      const hasPayloadSets = hasNonEmptyIntruderPayloadSets(parsed.payloadSets);
+      const hasPayloadQueries = hasIntruderPayloadQueries(parsed.payloadSetQueries);
+
+      let effectiveInput: IntruderAttackRequest = parsed;
+      let payloadFallback:
+        | {
+            mode: 'catalog_query' | 'built_in_defaults';
+            reason: string;
+          }
+        | null = null;
+
+      if (!hasPayloadSets && !hasPayloadQueries) {
+        effectiveInput = {
+          ...parsed,
+          payloadSetQueries: [buildDefaultIntruderCatalogQuery(parsed.maxRequests)],
+        };
+        payloadFallback = {
+          mode: 'catalog_query',
+          reason:
+            'No payloadSets or payloadSetQueries were provided by the model; used a default intruder payload catalog query.',
+        };
+      }
+
+      let out;
+      try {
+        out = await runIntruderAttack(effectiveInput);
+      } catch (err) {
+        const isNoPayloadSet =
+          isIntruderInputError(err) && /no payload set available\.?/i.test(err instanceof Error ? err.message : '');
+        if (!isNoPayloadSet) throw err;
+
+        out = await runIntruderAttack({
+          ...parsed,
+          payloadSets: [Array.from(DEFAULT_INTRUDER_FALLBACK_PAYLOADS)],
+        });
+        payloadFallback = {
+          mode: 'built_in_defaults',
+          reason:
+            payloadFallback == null
+              ? 'Payload inputs resolved empty; used built-in fallback payloads.'
+              : 'Default catalog query returned no payloads; used built-in fallback payloads.',
+        };
+      }
+
       const statusCounts: Record<string, number> = {};
       let errorCount = 0;
       for (const row of out.results) {
@@ -3350,10 +3673,11 @@ async function executeTool(
             statusCounts,
             errorCount,
           },
+          payloadFallback,
           results: out.results.slice(0, 120),
           omittedResults: Math.max(0, out.results.length - 120),
         },
-        summary: `Intruder attack executed ${out.requestCount} requests (${errorCount} errors).`,
+        summary: `Intruder attack executed ${out.requestCount} requests (${errorCount} errors)${payloadFallback ? ` with ${payloadFallback.mode} fallback payloads` : ''}.`,
       };
     }
     case 'explore_dex_protocols': {
@@ -3585,6 +3909,38 @@ async function executeTool(
         },
         summary: `Fetched markdown for ${target.host}${target.pathname} (${markdownOut.length} chars${truncated ? ', truncated' : ''}).`,
       };
+    }
+    case 'goto': {
+      const parsed = BrowserGotoArgsSchema.parse(args);
+      return await gotoPage(parsed);
+    }
+    case 'click': {
+      const parsed = BrowserClickArgsSchema.parse(args);
+      return await clickPage(parsed);
+    }
+    case 'type': {
+      const parsed = BrowserTypeArgsSchema.parse(args);
+      return await typeIntoPage(parsed);
+    }
+    case 'wait_for': {
+      const parsed = BrowserWaitForArgsSchema.parse(args);
+      return await waitForPage(parsed);
+    }
+    case 'evaluate_js': {
+      const parsed = BrowserEvaluateJsArgsSchema.parse(args);
+      return await evaluatePageJs(parsed);
+    }
+    case 'extract_text': {
+      const parsed = BrowserExtractTextArgsSchema.parse(args);
+      return await extractPageText(parsed);
+    }
+    case 'extract_dom': {
+      const parsed = BrowserExtractDomArgsSchema.parse(args);
+      return await extractPageDom(parsed);
+    }
+    case 'screenshot': {
+      const parsed = BrowserScreenshotArgsSchema.parse(args);
+      return await screenshotPage(parsed);
     }
     case 'discover_protocol_addresses': {
       const parsed = DiscoverProtocolAddressesArgsSchema.parse(args);
@@ -4272,4 +4628,8 @@ export async function runAiAgentChat(input: RunAiAgentChatInput): Promise<AiChat
     toolCalls,
     warnings,
   };
+}
+
+export async function closeAiAgentResources(): Promise<void> {
+  await closeBrowserAutomation();
 }

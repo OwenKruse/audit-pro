@@ -144,6 +144,31 @@ function parseRpcQuantity(value: unknown): bigint | null {
   return null;
 }
 
+function isTxHash(value: string): boolean {
+  return /^0x[0-9a-fA-F]{64}$/.test(value.trim());
+}
+
+function normalizeHexData(value: string): string | null {
+  const trimmed = value.trim();
+  if (!/^0x([0-9a-fA-F]{2})*$/.test(trimmed)) return null;
+  return trimmed.toLowerCase();
+}
+
+function parseBytes32Input(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (/^0x[0-9a-fA-F]+$/.test(trimmed)) {
+    const hex = trimmed.slice(2);
+    if (hex.length > 64) return null;
+    return `0x${hex.padStart(64, '0').toLowerCase()}`;
+  }
+
+  const asQuantity = parseRpcQuantity(trimmed);
+  if (asQuantity == null || asQuantity < BigInt(0) || asQuantity > UINT256_MAX) return null;
+  return toBytes32Hex(asQuantity);
+}
+
 function uniqueAddresses(values: string[]): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -152,6 +177,18 @@ function uniqueAddresses(values: string[]): string[] {
     if (!normalized || seen.has(normalized)) continue;
     seen.add(normalized);
     out.push(normalized);
+  }
+  return out;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
   }
   return out;
 }
@@ -173,7 +210,7 @@ function parseAddressList(raw: string): { valid: string[]; invalid: string[] } {
   }
   return {
     valid: uniqueAddresses(valid),
-    invalid: uniqueAddresses(invalid),
+    invalid: uniqueStrings(invalid),
   };
 }
 
@@ -315,7 +352,22 @@ export function FoundryDevToolsCard() {
   const [impersonationAddress, setImpersonationAddress] = useState('');
   const [activeImpersonations, setActiveImpersonations] = useState<string[]>([]);
 
+  const [mutatorBusy, setMutatorBusy] = useState(false);
+  const [mutatorStatus, setMutatorStatus] = useState<InlineStatus | null>(null);
+  const [nonceAddress, setNonceAddress] = useState('');
+  const [nonceValue, setNonceValue] = useState('0');
+  const [storageAddress, setStorageAddress] = useState('');
+  const [storageSlot, setStorageSlot] = useState('0');
+  const [storageValue, setStorageValue] = useState('0');
+  const [readStorageValue, setReadStorageValue] = useState('');
+  const [codeAddress, setCodeAddress] = useState('');
+  const [codeHex, setCodeHex] = useState('0x');
+  const [dropTxHash, setDropTxHash] = useState('');
+  const [resetForkUrl, setResetForkUrl] = useState('');
+  const [resetForkBlock, setResetForkBlock] = useState('');
+
   const [pairPresets, setPairPresets] = useState<TokenPairPreset[]>([]);
+  const [pairPresetsHydrated, setPairPresetsHydrated] = useState(false);
   const [selectedPairPresetId, setSelectedPairPresetId] = useState('');
   const [pairForm, setPairForm] = useState<TokenPairForm>(EMPTY_PAIR_FORM);
   const [pairTargetWallet, setPairTargetWallet] = useState('');
@@ -441,19 +493,22 @@ export function FoundryDevToolsCard() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const raw = window.localStorage.getItem(PAIR_PRESET_STORAGE_KEY);
-    if (!raw) return;
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      setPairPresets(parsePresets(parsed));
-    } catch {
-      setPairPresets([]);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        setPairPresets(parsePresets(parsed));
+      } catch {
+        setPairPresets([]);
+      }
     }
+    setPairPresetsHydrated(true);
   }, []);
 
   useEffect(() => {
+    if (!pairPresetsHydrated) return;
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(PAIR_PRESET_STORAGE_KEY, JSON.stringify(pairPresets));
-  }, [pairPresets]);
+  }, [pairPresets, pairPresetsHydrated]);
 
   useEffect(() => {
     if (pairTargetWallet.trim()) return;
@@ -465,6 +520,14 @@ export function FoundryDevToolsCard() {
       setPairTargetWallet(detectedWallets[0]);
     }
   }, [detectedWallets, pairTargetWallet, wallet.address]);
+
+  useEffect(() => {
+    const preferred = wallet.address && isAddress(wallet.address) ? wallet.address.toLowerCase() : detectedWallets[0];
+    if (!preferred) return;
+    if (!nonceAddress.trim()) setNonceAddress(preferred);
+    if (!storageAddress.trim()) setStorageAddress(preferred);
+    if (!codeAddress.trim()) setCodeAddress(preferred);
+  }, [codeAddress, detectedWallets, nonceAddress, storageAddress, wallet.address]);
 
   function appendManualTargets(addresses: string[]) {
     const existing = parseAddressList(manualTargets).valid;
@@ -483,6 +546,14 @@ export function FoundryDevToolsCard() {
       nextAmount = currentWei + amountWei;
     }
     await callLocalRpc('anvil_setBalance', [address, toRpcHex(nextAmount)]);
+    // #region agent log
+    try {
+      const verifyBalance = await callRpc<unknown>('eth_getBalance', [address, 'latest']);
+      fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'FoundryDevToolsCard.tsx:setNativeBalance:verify',message:'post-fund eth_getBalance',data:{address,setAmountHex:toRpcHex(nextAmount),anvilReportedBalanceHex:verifyBalance},timestamp:Date.now(),hypothesisId:'H-F,H-G'})}).catch(()=>{});
+    } catch(e) {
+      fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'FoundryDevToolsCard.tsx:setNativeBalance:verify-error',message:'post-fund verify failed',data:{address,error:String(e)},timestamp:Date.now(),hypothesisId:'H-F,H-G'})}).catch(()=>{});
+    }
+    // #endregion
   }
 
   async function onFundTargets(inputTargets: string[], sourceLabel: string) {
@@ -520,6 +591,9 @@ export function FoundryDevToolsCard() {
 
   async function onFundManualTargets() {
     const parsed = parseAddressList(manualTargets);
+    // #region agent log
+    fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'FoundryDevToolsCard.tsx:onFundManualTargets',message:'fund manual targets clicked',data:{validAddresses:parsed.valid,invalidAddresses:parsed.invalid,connectedWalletAddress:wallet.address,manualTargetsRaw:manualTargets},timestamp:Date.now(),hypothesisId:'H-B'})}).catch(()=>{});
+    // #endregion
     if (parsed.invalid.length) {
       setFundingStatus({
         ok: false,
@@ -531,6 +605,9 @@ export function FoundryDevToolsCard() {
   }
 
   async function onFundDetectedTargets() {
+    // #region agent log
+    fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'FoundryDevToolsCard.tsx:onFundDetectedTargets',message:'fund detected wallets clicked',data:{detectedWallets,connectedWalletAddress:wallet.address},timestamp:Date.now(),hypothesisId:'H-F,H-G'})}).catch(()=>{});
+    // #endregion
     await onFundTargets(detectedWallets, 'detected wallet list');
   }
 
@@ -688,6 +765,23 @@ export function FoundryDevToolsCard() {
       });
     } finally {
       setImpersonationBusy(false);
+    }
+  }
+
+  async function runMutatorAction(task: () => Promise<string>) {
+    setMutatorBusy(true);
+    setMutatorStatus(null);
+    try {
+      const message = await task();
+      setMutatorStatus({ ok: true, message });
+      await refreshLatestBlock();
+    } catch (err) {
+      setMutatorStatus({
+        ok: false,
+        message: err instanceof Error ? err.message : 'Failed to run mutator action.',
+      });
+    } finally {
+      setMutatorBusy(false);
     }
   }
 
@@ -1113,6 +1207,273 @@ export function FoundryDevToolsCard() {
           )}
 
           {impersonationStatus ? <InlineMessage ok={impersonationStatus.ok} message={impersonationStatus.message} /> : null}
+        </section>
+
+        <section className="space-y-2 rounded border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] p-2">
+          <div className="text-[10px] font-bold uppercase text-[color:var(--cs-muted)]">Low-Level State Mutators</div>
+          <p className="text-[10px] text-[color:var(--cs-muted)]">
+            Direct account/contract state edits via Anvil RPC (`anvil_setNonce`, `anvil_setStorageAt`, `anvil_setCode`, `anvil_dropTransaction`, `anvil_reset`).
+          </p>
+
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+            <label className="block space-y-0.5">
+              <div className="text-[10px] text-[color:var(--cs-muted)]">Nonce Address</div>
+              <input
+                className={inputClass}
+                value={nonceAddress}
+                onChange={(e) => setNonceAddress(e.target.value)}
+                placeholder="0x..."
+              />
+            </label>
+            <label className="block space-y-0.5">
+              <div className="text-[10px] text-[color:var(--cs-muted)]">Nonce (dec or hex)</div>
+              <input
+                className={inputClass}
+                value={nonceValue}
+                onChange={(e) => setNonceValue(e.target.value)}
+                placeholder="0"
+              />
+            </label>
+            <div className="flex items-end">
+              <button
+                type="button"
+                className={btnClass}
+                disabled={mutatorBusy}
+                onClick={() =>
+                  void runMutatorAction(async () => {
+                    const address = normalizeAddress(nonceAddress);
+                    if (!address) throw new Error('Nonce address must be a valid address.');
+                    const nonce = parseRpcQuantity(nonceValue);
+                    if (nonce == null || nonce < BigInt(0)) {
+                      throw new Error('Nonce must be a non-negative decimal or hex quantity.');
+                    }
+                    await callLocalRpc('anvil_setNonce', [address, toRpcHex(nonce)]);
+                    return `Set nonce for ${address} to ${nonce.toString()}.`;
+                  })
+                }
+              >
+                {mutatorBusy ? 'Running…' : 'Set Nonce'}
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
+            <label className="block space-y-0.5 md:col-span-2">
+              <div className="text-[10px] text-[color:var(--cs-muted)]">Storage Contract</div>
+              <input
+                className={inputClass}
+                value={storageAddress}
+                onChange={(e) => setStorageAddress(e.target.value)}
+                placeholder="0x..."
+              />
+            </label>
+            <label className="block space-y-0.5">
+              <div className="text-[10px] text-[color:var(--cs-muted)]">Slot (dec/hex)</div>
+              <input
+                className={inputClass}
+                value={storageSlot}
+                onChange={(e) => setStorageSlot(e.target.value)}
+                placeholder="0"
+              />
+            </label>
+            <label className="block space-y-0.5">
+              <div className="text-[10px] text-[color:var(--cs-muted)]">Value (bytes32/dec/hex)</div>
+              <input
+                className={inputClass}
+                value={storageValue}
+                onChange={(e) => setStorageValue(e.target.value)}
+                placeholder="0"
+              />
+            </label>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className={btnClass}
+              disabled={mutatorBusy}
+              onClick={() =>
+                void runMutatorAction(async () => {
+                  const address = normalizeAddress(storageAddress);
+                  if (!address) throw new Error('Storage contract address must be valid.');
+                  const slot = parseRpcQuantity(storageSlot);
+                  if (slot == null || slot < BigInt(0) || slot > UINT256_MAX) {
+                    throw new Error('Storage slot must be a non-negative decimal or hex quantity.');
+                  }
+                  const valueBytes32 = parseBytes32Input(storageValue);
+                  if (!valueBytes32) {
+                    throw new Error('Storage value must be a valid bytes32, decimal, or hex quantity.');
+                  }
+                  await callLocalRpc('anvil_setStorageAt', [address, toBytes32Hex(slot), valueBytes32]);
+                  return `Set storage slot ${toRpcHex(slot)} on ${address}.`;
+                })
+              }
+            >
+              {mutatorBusy ? 'Running…' : 'Set Storage Slot'}
+            </button>
+            <button
+              type="button"
+              className={btnClass}
+              disabled={mutatorBusy}
+              onClick={() =>
+                void runMutatorAction(async () => {
+                  const address = normalizeAddress(storageAddress);
+                  if (!address) throw new Error('Storage contract address must be valid.');
+                  const slot = parseRpcQuantity(storageSlot);
+                  if (slot == null || slot < BigInt(0) || slot > UINT256_MAX) {
+                    throw new Error('Storage slot must be a non-negative decimal or hex quantity.');
+                  }
+                  const value = await callRpc<unknown>('eth_getStorageAt', [address, toRpcHex(slot), 'latest']);
+                  if (typeof value !== 'string') {
+                    throw new Error('eth_getStorageAt returned non-string value.');
+                  }
+                  setReadStorageValue(value);
+                  return `Read storage slot ${toRpcHex(slot)} from ${address}.`;
+                })
+              }
+            >
+              {mutatorBusy ? 'Running…' : 'Read Storage Slot'}
+            </button>
+            {readStorageValue ? (
+              <code className="rounded border border-[color:var(--cs-border)] bg-[color:var(--cs-panel-soft)] px-1.5 py-1 font-mono text-[10px] text-[color:var(--cs-fg)]">
+                {readStorageValue}
+              </code>
+            ) : null}
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
+            <label className="block space-y-0.5 md:col-span-1">
+              <div className="text-[10px] text-[color:var(--cs-muted)]">Code Address</div>
+              <input
+                className={inputClass}
+                value={codeAddress}
+                onChange={(e) => setCodeAddress(e.target.value)}
+                placeholder="0x..."
+              />
+            </label>
+            <label className="block space-y-0.5 md:col-span-3">
+              <div className="text-[10px] text-[color:var(--cs-muted)]">Runtime Bytecode (hex)</div>
+              <input
+                className={inputClass}
+                value={codeHex}
+                onChange={(e) => setCodeHex(e.target.value)}
+                placeholder="0x60006000..."
+              />
+            </label>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className={btnClass}
+              disabled={mutatorBusy}
+              onClick={() =>
+                void runMutatorAction(async () => {
+                  const address = normalizeAddress(codeAddress);
+                  if (!address) throw new Error('Code address must be a valid address.');
+                  const bytecode = normalizeHexData(codeHex);
+                  if (!bytecode) {
+                    throw new Error('Bytecode must be 0x-prefixed even-length hex data.');
+                  }
+                  await callLocalRpc('anvil_setCode', [address, bytecode]);
+                  return `Set runtime bytecode for ${address}.`;
+                })
+              }
+            >
+              {mutatorBusy ? 'Running…' : 'Set Runtime Bytecode'}
+            </button>
+            <label className="block min-w-[230px] flex-1 space-y-0.5">
+              <div className="text-[10px] text-[color:var(--cs-muted)]">Drop Pending Tx Hash</div>
+              <input
+                className={inputClass}
+                value={dropTxHash}
+                onChange={(e) => setDropTxHash(e.target.value)}
+                placeholder="0x..."
+              />
+            </label>
+            <button
+              type="button"
+              className={btnClass}
+              disabled={mutatorBusy}
+              onClick={() =>
+                void runMutatorAction(async () => {
+                  if (!isTxHash(dropTxHash)) throw new Error('Tx hash must be 0x-prefixed 32-byte hash.');
+                  const hash = dropTxHash.trim().toLowerCase();
+                  await callLocalRpc('anvil_dropTransaction', [hash]);
+                  return `Dropped pending transaction ${hash}.`;
+                })
+              }
+            >
+              {mutatorBusy ? 'Running…' : 'Drop Pending Tx'}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+            <label className="block space-y-0.5 md:col-span-2">
+              <div className="text-[10px] text-[color:var(--cs-muted)]">Reset Fork URL (optional)</div>
+              <input
+                className={inputClass}
+                value={resetForkUrl}
+                onChange={(e) => setResetForkUrl(e.target.value)}
+                placeholder="https://eth.llamarpc.com"
+              />
+            </label>
+            <label className="block space-y-0.5">
+              <div className="text-[10px] text-[color:var(--cs-muted)]">Reset Fork Block (optional)</div>
+              <input
+                className={inputClass}
+                value={resetForkBlock}
+                onChange={(e) => setResetForkBlock(e.target.value)}
+                placeholder="latest"
+              />
+            </label>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className={btnClass}
+              disabled={mutatorBusy}
+              onClick={() =>
+                void runMutatorAction(async () => {
+                  await callLocalRpc('anvil_reset', []);
+                  return 'Reset Anvil chain state with current fork configuration.';
+                })
+              }
+            >
+              {mutatorBusy ? 'Running…' : 'Reset Chain'}
+            </button>
+            <button
+              type="button"
+              className={btnClass}
+              disabled={mutatorBusy}
+              onClick={() =>
+                void runMutatorAction(async () => {
+                  const forkUrl = resetForkUrl.trim();
+                  const block = resetForkBlock.trim();
+                  if (!forkUrl) {
+                    throw new Error('Fork URL is required for fork-reset action.');
+                  }
+                  const params: Record<string, unknown> = {
+                    forking: {
+                      jsonRpcUrl: forkUrl,
+                    },
+                  };
+                  if (block) {
+                    const blockNumber = parseNonNegativeSafeInt(block);
+                    if (blockNumber == null) throw new Error('Fork block must be a non-negative integer.');
+                    (params.forking as { blockNumber?: number }).blockNumber = blockNumber;
+                  }
+                  await callLocalRpc('anvil_reset', [params]);
+                  return `Reset Anvil to fork ${forkUrl}${block ? ` @ block ${block}` : ''}.`;
+                })
+              }
+            >
+              {mutatorBusy ? 'Running…' : 'Reset To Fork'}
+            </button>
+          </div>
+
+          {mutatorStatus ? <InlineMessage ok={mutatorStatus.ok} message={mutatorStatus.message} /> : null}
         </section>
 
         <section className="space-y-2 rounded border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] p-2">

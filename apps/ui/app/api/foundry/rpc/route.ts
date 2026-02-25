@@ -1,13 +1,6 @@
 type RpcBody = {
-  rpcUrl: string;
-  method: string;
+  method?: unknown;
   params?: unknown;
-};
-
-type RpcUpstreamError = {
-  code?: unknown;
-  message?: unknown;
-  data?: unknown;
 };
 
 type AgentRpcSuccess = {
@@ -33,35 +26,6 @@ type AgentStatusResponse = {
 };
 
 const agentHttpUrl = process.env.AGENT_HTTP_URL ?? 'http://127.0.0.1:17400';
-const MAINNET_RPC_FALLBACKS = [
-  'https://ethereum-rpc.publicnode.com',
-  'https://rpc.flashbots.net',
-  'https://eth.merkle.io',
-  'https://eth.llamarpc.com',
-];
-
-function normalizeRpcUrl(value: string): string {
-  return value.trim().replace(/\/+$/, '');
-}
-
-function parseBody(raw: unknown): RpcBody | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const body = raw as Record<string, unknown>;
-  if (typeof body.rpcUrl !== 'string') return null;
-  if (typeof body.method !== 'string') return null;
-  return {
-    rpcUrl: normalizeRpcUrl(body.rpcUrl),
-    method: body.method.trim(),
-    params: body.params,
-  };
-}
-
-function asRpcErrorMessage(err: unknown): string {
-  if (!err || typeof err !== 'object') return 'Foundry RPC error.';
-  const value = err as RpcUpstreamError;
-  if (typeof value.message === 'string' && value.message.trim()) return value.message;
-  return 'Foundry RPC error.';
-}
 
 function normalizeParams(input: unknown): unknown[] {
   if (input == null) return [];
@@ -69,129 +33,17 @@ function normalizeParams(input: unknown): unknown[] {
   return [input];
 }
 
-function isLocalRpcUrl(url: URL): boolean {
-  const host = url.hostname.toLowerCase();
-  return host === 'localhost' || host === '::1' || host === '0.0.0.0' || host.startsWith('127.');
+function parseBody(raw: unknown): { method: string; params: unknown[] } | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const body = raw as RpcBody;
+  if (typeof body.method !== 'string') return null;
+  return {
+    method: body.method.trim(),
+    params: normalizeParams(body.params),
+  };
 }
 
-function isLikelyStateChangingMethod(method: string): boolean {
-  const m = method.trim().toLowerCase();
-  if (!m) return true;
-  return (
-    m.startsWith('eth_send') ||
-    m.startsWith('personal_') ||
-    m.startsWith('wallet_') ||
-    m.startsWith('anvil_') ||
-    m.startsWith('hardhat_') ||
-    m.startsWith('evm_') ||
-    m.startsWith('miner_') ||
-    m.startsWith('debug_tracecall')
-  );
-}
-
-function looksLikeHtml(text: string): boolean {
-  const raw = text.trim().toLowerCase();
-  if (!raw) return false;
-  return (
-    raw.includes('<!doctype html') ||
-    raw.includes('<html') ||
-    raw.includes('</html>') ||
-    raw.includes('cf-wrapper') ||
-    raw.includes('_cf_translation')
-  );
-}
-
-function compactSnippet(text: string, max = 220): string {
-  const normalized = text.replace(/\s+/g, ' ').trim();
-  if (!normalized) return '';
-  return normalized.length <= max ? normalized : `${normalized.slice(0, max)}...`;
-}
-
-function fallbackCandidatesFor(url: URL): string[] {
-  const host = url.hostname.toLowerCase();
-  const knownMainnetHosts = new Set([
-    'eth.llamarpc.com',
-    'eth.merkle.io',
-    'rpc.flashbots.net',
-    'ethereum-rpc.publicnode.com',
-  ]);
-  if (!knownMainnetHosts.has(host)) return [];
-  const current = normalizeRpcUrl(url.toString());
-  return MAINNET_RPC_FALLBACKS.filter((candidate) => normalizeRpcUrl(candidate) !== current);
-}
-
-type RpcEndpointOutcome =
-  | { kind: 'network_error'; message: string }
-  | {
-      kind: 'response';
-      status: number;
-      statusText: string;
-      rawText: string;
-      json: unknown | null;
-    };
-
-async function fetchRpcEndpoint(endpoint: string, payload: unknown, timeoutMs = 15_000): Promise<RpcEndpointOutcome> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const upstream = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-      cache: 'no-store',
-      signal: controller.signal,
-    });
-    const rawText = await upstream.text().catch(() => '');
-    let json: unknown | null = null;
-    if (rawText) {
-      try {
-        json = JSON.parse(rawText) as unknown;
-      } catch {
-        json = null;
-      }
-    }
-    return {
-      kind: 'response',
-      status: upstream.status,
-      statusText: upstream.statusText,
-      rawText,
-      json,
-    };
-  } catch (err) {
-    return {
-      kind: 'network_error',
-      message: err instanceof Error ? err.message : 'Failed to reach Foundry RPC endpoint.',
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function tryAgentRpcFallback(method: string, params: unknown[]): Promise<AgentRpcSuccess | AgentRpcError> {
-  const res = await fetch(`${agentHttpUrl}/evm/rpc`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ method, params }),
-    cache: 'no-store',
-  });
-  const json = (await res.json().catch(() => null)) as AgentRpcSuccess | AgentRpcError | null;
-  if (!json || typeof json !== 'object' || !('ok' in json) || typeof json.ok !== 'boolean') {
-    const message = `Agent returned invalid response (${res.status}).`;
-    return { ok: false, error: { code: 'agent_invalid_response', message } };
-  }
-  if (res.ok) return json;
-  const errorCode =
-    !json.ok && json.error && typeof json.error.code === 'string'
-      ? json.error.code
-      : 'agent_rpc_failed';
-  const message =
-    !json.ok && json.error && typeof json.error.message === 'string' && json.error.message.trim()
-      ? json.error.message
-      : `Agent RPC failed (${res.status}).`;
-  return { ok: false, error: { code: errorCode, message } };
-}
-
-async function tryReadAgentStartupError(): Promise<string | null> {
+async function readAgentStartupError(): Promise<string | null> {
   try {
     const res = await fetch(`${agentHttpUrl}/evm/status`, { cache: 'no-store' });
     if (!res.ok) return null;
@@ -210,6 +62,9 @@ export async function POST(req: Request): Promise<Response> {
   try {
     rawBody = await req.json();
   } catch {
+    // #region agent log
+    fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'foundry/rpc/route.ts:parse-error',message:'bad json body',data:{},timestamp:Date.now(),hypothesisId:'H-C'})}).catch(()=>{});
+    // #endregion
     return Response.json(
       { ok: false, error: { code: 'bad_request', message: 'Invalid JSON body.' } },
       { status: 400, headers: { 'cache-control': 'no-store' } },
@@ -219,7 +74,7 @@ export async function POST(req: Request): Promise<Response> {
   const body = parseBody(rawBody);
   if (!body) {
     return Response.json(
-      { ok: false, error: { code: 'bad_request', message: 'rpcUrl and method are required.' } },
+      { ok: false, error: { code: 'bad_request', message: 'method is required.' } },
       { status: 400, headers: { 'cache-control': 'no-store' } },
     );
   }
@@ -231,171 +86,73 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  let url: URL;
+  let upstream: Response;
   try {
-    url = new URL(body.rpcUrl);
-  } catch {
-    return Response.json(
-      { ok: false, error: { code: 'bad_request', message: 'rpcUrl must be a valid URL.' } },
-      { status: 400, headers: { 'cache-control': 'no-store' } },
-    );
-  }
-
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return Response.json(
-      { ok: false, error: { code: 'bad_request', message: 'rpcUrl must use http or https.' } },
-      { status: 400, headers: { 'cache-control': 'no-store' } },
-    );
-  }
-
-  const params = normalizeParams(body.params);
-  const payload = {
-    jsonrpc: '2.0',
-    id: Date.now(),
-    method: body.method,
-    params,
-  };
-
-  const allowFallbackRetry = !isLocalRpcUrl(url) && !isLikelyStateChangingMethod(body.method);
-  const candidateUrls = [
-    url.toString(),
-    ...(allowFallbackRetry ? fallbackCandidatesFor(url) : []),
-  ];
-
-  for (let i = 0; i < candidateUrls.length; i += 1) {
-    const endpoint = candidateUrls[i];
-    const hasNext = i < candidateUrls.length - 1;
-    const outcome = await fetchRpcEndpoint(endpoint, payload);
-
-    if (outcome.kind === 'network_error') {
-      if (i === 0 && isLocalRpcUrl(url)) {
-        try {
-          const agentResult = await tryAgentRpcFallback(body.method, params);
-          if (agentResult.ok) {
-            return Response.json(
-              { ok: true, result: agentResult.result },
-              { headers: { 'cache-control': 'no-store' } },
-            );
-          }
-          const agentMessage =
-            agentResult.error?.message && typeof agentResult.error.message === 'string'
-              ? agentResult.error.message
-              : 'Agent fallback failed.';
-          let startupHint: string | null = null;
-          if (agentResult.error?.code === 'evm_unavailable') {
-            startupHint = await tryReadAgentStartupError();
-          }
-          return Response.json(
-            {
-              ok: false,
-              error: {
-                code: 'upstream_unreachable',
-                message: startupHint
-                  ? `Direct RPC failed: ${outcome.message}. Agent fallback failed: ${agentMessage}. Foundry startup error: ${startupHint}`
-                  : `Direct RPC failed: ${outcome.message}. Agent fallback failed: ${agentMessage}`,
-              },
-            },
-            { status: 502, headers: { 'cache-control': 'no-store' } },
-          );
-        } catch (agentErr) {
-          const fallbackMessage = agentErr instanceof Error ? agentErr.message : 'Agent fallback failed.';
-          const startupHint = await tryReadAgentStartupError();
-          return Response.json(
-            {
-              ok: false,
-              error: {
-                code: 'upstream_unreachable',
-                message: startupHint
-                  ? `Direct RPC failed: ${outcome.message}. Agent fallback failed: ${fallbackMessage}. Foundry startup error: ${startupHint}`
-                  : `Direct RPC failed: ${outcome.message}. Agent fallback failed: ${fallbackMessage}`,
-              },
-            },
-            { status: 502, headers: { 'cache-control': 'no-store' } },
-          );
-        }
-      }
-
-      if (hasNext) continue;
-      return Response.json(
-        {
-          ok: false,
-          error: {
-            code: 'upstream_unreachable',
-            message: `Failed to reach RPC endpoint ${endpoint}: ${outcome.message}`,
-          },
-        },
-        { status: 502, headers: { 'cache-control': 'no-store' } },
-      );
-    }
-
-    if (outcome.status < 200 || outcome.status >= 300) {
-      const htmlLike = looksLikeHtml(outcome.rawText);
-      if (hasNext && (outcome.status === 429 || outcome.status >= 500 || htmlLike)) {
-        continue;
-      }
-      const snippet = compactSnippet(outcome.rawText);
-      return Response.json(
-        {
-          ok: false,
-          error: {
-            code: 'upstream_http_error',
-            message: `Foundry RPC HTTP ${outcome.status}: ${outcome.statusText} at ${endpoint}${snippet ? `. Body: ${snippet}` : ''}`,
-          },
-        },
-        { status: 502, headers: { 'cache-control': 'no-store' } },
-      );
-    }
-
-    if (!outcome.json || typeof outcome.json !== 'object') {
-      const htmlLike = looksLikeHtml(outcome.rawText);
-      if (hasNext && (htmlLike || !outcome.rawText.trim())) {
-        continue;
-      }
-      const snippet = compactSnippet(outcome.rawText);
-      return Response.json(
-        {
-          ok: false,
-          error: {
-            code: 'upstream_invalid_json',
-            message: `Foundry RPC at ${endpoint} returned invalid JSON.${htmlLike ? ' Upstream returned HTML instead of JSON-RPC.' : ''}${snippet ? ` Body: ${snippet}` : ''}`,
-          },
-        },
-        { status: 502, headers: { 'cache-control': 'no-store' } },
-      );
-    }
-
-    const rpc = outcome.json as Record<string, unknown>;
-    if ('error' in rpc && rpc.error != null) {
-      return Response.json(
-        {
-          ok: false,
-          error: {
-            code: 'rpc_error',
-            message: asRpcErrorMessage(rpc.error),
-            data: (rpc.error as RpcUpstreamError).data,
-          },
-        },
-        { headers: { 'cache-control': 'no-store' } },
-      );
-    }
-
+    upstream = await fetch(`${agentHttpUrl}/evm/rpc`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ method: body.method, params: body.params }),
+      cache: 'no-store',
+    });
+  } catch (err) {
     return Response.json(
       {
-        ok: true,
-        result: 'result' in rpc ? rpc.result : null,
+        ok: false,
+        error: {
+          code: 'upstream_unreachable',
+          message: err instanceof Error ? err.message : 'Failed to reach Foundry RPC endpoint.',
+        },
       },
+      { status: 502, headers: { 'cache-control': 'no-store' } },
+    );
+  }
+
+  const json = (await upstream.json().catch(() => null)) as AgentRpcSuccess | AgentRpcError | null;
+  if (!json || typeof json !== 'object' || !('ok' in json) || typeof json.ok !== 'boolean') {
+    return Response.json(
+      {
+        ok: false,
+        error: {
+          code: 'agent_invalid_response',
+          message: `Agent returned invalid response (${upstream.status}).`,
+        },
+      },
+      { status: 502, headers: { 'cache-control': 'no-store' } },
+    );
+  }
+
+  if (json.ok) {
+    // #region agent log
+    fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'foundry/rpc/route.ts:ok',message:'rpc ok',data:{method:body.method,params:body.params,result:String(json.result).slice(0,80)},timestamp:Date.now(),hypothesisId:'H-B,H-C'})}).catch(()=>{});
+    // #endregion
+    return Response.json(
+      { ok: true, result: json.result },
       { headers: { 'cache-control': 'no-store' } },
     );
   }
 
+  const errorCode =
+    typeof json.error?.code === 'string' && json.error.code.trim()
+      ? json.error.code
+      : 'agent_rpc_failed';
+  const errorMessage =
+    typeof json.error?.message === 'string' && json.error.message.trim()
+      ? json.error.message
+      : `Agent RPC failed (${upstream.status}).`;
+  const startupHint = errorCode === 'evm_unavailable' ? await readAgentStartupError() : null;
+
+  // #region agent log
+  fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'foundry/rpc/route.ts:error',message:'rpc error',data:{method:body.method,errorCode,errorMessage,startupHint},timestamp:Date.now(),hypothesisId:'H-C,H-D'})}).catch(()=>{});
+  // #endregion
   return Response.json(
     {
       ok: false,
       error: {
-        code: 'upstream_unreachable',
-        message: 'All RPC endpoints failed to return a valid JSON-RPC response.',
+        code: errorCode,
+        message: startupHint ? `${errorMessage} Foundry startup error: ${startupHint}` : errorMessage,
+        data: json.error?.data,
       },
     },
-    { status: 502, headers: { 'cache-control': 'no-store' } },
+    { status: errorCode === 'evm_unavailable' ? 503 : 502, headers: { 'cache-control': 'no-store' } },
   );
 }

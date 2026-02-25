@@ -75,6 +75,9 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   if (json.ok) {
+    // #region agent log
+    fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'foundry/wallet-rpc/route.ts:ok',message:'wallet-rpc hit',data:{method,params:params.slice(0,2),result:String(json.result).slice(0,80)},timestamp:Date.now(),hypothesisId:'H-A'})}).catch(()=>{});
+    // #endregion
     return Response.json(
       {
         jsonrpc: '2.0',
@@ -94,5 +97,8 @@ export async function POST(req: Request): Promise<Response> {
       ? json.error.message
       : `Agent RPC failed (${upstream.status}).`;
 
+  // #region agent log
+  fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'foundry/wallet-rpc/route.ts:rpc-error',message:'wallet-rpc error',data:{method,rpcCode,message},timestamp:Date.now(),hypothesisId:'H-A'})}).catch(()=>{});
+  // #endregion
   return jsonRpcError(body.id ?? null, rpcCode, message, json.error?.data);
 }

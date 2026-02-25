@@ -133,6 +133,7 @@ export function FoundrySettingsCard() {
   const [connecting, setConnecting] = useState(false);
   const [signing, setSigning] = useState(false);
   const [switching, setSwitching] = useState(false);
+  const [probingWalletBalance, setProbingWalletBalance] = useState(false);
 
   const [settingsStatus, setSettingsStatus] = useState<InlineStatus | null>(null);
   const [rpcStatus, setRpcStatus] = useState<InlineStatus | null>(null);
@@ -142,10 +143,37 @@ export function FoundrySettingsCard() {
   const [loadingDevWallets, setLoadingDevWallets] = useState(false);
   const [fundingDevWallets, setFundingDevWallets] = useState(false);
   const [fundAmountEth, setFundAmountEth] = useState('10000');
+  const [walletRpcUrl, setWalletRpcUrl] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     setDraft(settings);
   }, [settings]);
+
+  useEffect(() => {
+    fetch('/api/foundry/wallet-rpc-info')
+      .then((r) => r.json())
+      .then((data: unknown) => {
+        const url = (data as { walletRpcUrl?: unknown })?.walletRpcUrl;
+        if (typeof url === 'string' && url) {
+          setWalletRpcUrl(url);
+          // #region agent log
+          fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'FoundrySettingsCard.tsx:wallet-rpc-info',message:'resolved wallet rpc url',data:{walletRpcUrl:url},timestamp:Date.now(),hypothesisId:'H-I'})}).catch(()=>{});
+          // #endregion
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  function copyWalletRpcUrl() {
+    if (!walletRpcUrl) return;
+    navigator.clipboard.writeText(walletRpcUrl).then(() => {
+      setCopied(true);
+    }).catch(() => {});
+    // #region agent log
+    fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'FoundrySettingsCard.tsx:copyWalletRpcUrl',message:'user copied wallet rpc url',data:{walletRpcUrl},timestamp:Date.now(),hypothesisId:'H-G'})}).catch(()=>{});
+    // #endregion
+  }
 
   const walletChainId = useMemo(() => {
     if (!wallet.chainIdHex) return null;
@@ -503,6 +531,57 @@ export function FoundrySettingsCard() {
     }
   }
 
+  async function onProbeWalletBalance() {
+    setProbingWalletBalance(true);
+    setWalletStatus(null);
+    try {
+      const provider = getEthereumProvider();
+      if (!provider) throw new Error('No injected wallet found.');
+
+      const accounts = await callWalletRpc<unknown>({
+        provider,
+        method: 'eth_accounts',
+        rpcUrl: walletRpcUrl ?? settings.rpcUrl,
+        chainId: settings.chainId,
+      });
+      const activeAddress =
+        Array.isArray(accounts) && typeof accounts[0] === 'string' ? accounts[0].toLowerCase() : null;
+      if (!activeAddress || !isAddress(activeAddress)) {
+        throw new Error('Wallet did not return a valid active account.');
+      }
+
+      const walletBalance = await callWalletRpc<unknown>({
+        provider,
+        method: 'eth_getBalance',
+        params: [activeAddress, 'latest'],
+        rpcUrl: walletRpcUrl ?? settings.rpcUrl,
+        chainId: settings.chainId,
+      });
+      const foundryBalance = await callFoundryRpc<unknown>({
+        rpcUrl: settings.rpcUrl,
+        method: 'eth_getBalance',
+        params: [activeAddress, 'latest'],
+        chainId: settings.chainId,
+      });
+
+      // #region agent log
+      fetch('http://127.0.0.1:7683/ingest/826eec37-4705-4e23-8b79-6677a4f37c3e',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'4aeaa9'},body:JSON.stringify({sessionId:'4aeaa9',location:'FoundrySettingsCard.tsx:onProbeWalletBalance',message:'wallet vs foundry balance probe',data:{activeAddress,walletBalanceHex:walletBalance,foundryBalanceHex:foundryBalance,walletRpcUrl:walletRpcUrl ?? settings.rpcUrl},timestamp:Date.now(),hypothesisId:'H-I,H-J,H-K'})}).catch(()=>{});
+      // #endregion
+
+      setWalletStatus({
+        ok: true,
+        message: `Probe ${activeAddress}: wallet=${String(walletBalance)} foundry=${String(foundryBalance)}`,
+      });
+    } catch (err) {
+      setWalletStatus({
+        ok: false,
+        message: walletErrorMessage(err, 'Failed to probe wallet balance.'),
+      });
+    } finally {
+      setProbingWalletBalance(false);
+    }
+  }
+
   return (
     <>
       <div className="border-b border-[color:var(--cs-border)]">
@@ -637,12 +716,33 @@ export function FoundrySettingsCard() {
           <p className="text-[11px] text-[color:var(--cs-muted)]">
             Connect your injected wallet and authenticate for Contract Sandbox transactions.
           </p>
-          <p className="text-[10px] text-[color:var(--cs-muted)]">
-            For local Anvil (`127.0.0.1/localhost`), chain add/switch uses HTTPS bridge URL automatically.
-          </p>
-          <div className="rounded border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] px-2 py-1.5 font-mono text-[10px] text-[color:var(--cs-muted)]">
-            Wallet RPC (MetaMask): {effectiveWalletRpcUrl}
-          </div>
+          {walletRpcUrl ? (
+            <div className="rounded border border-[color:var(--cs-accent)]/40 bg-[color:var(--cs-accent)]/5 p-2">
+              <div className="mb-1 text-[10px] font-bold uppercase text-[color:var(--cs-accent)]">
+                Wallet RPC URL — add this to MetaMask / Rabby
+              </div>
+              <div className="mb-1.5 flex items-center gap-1.5">
+                <code className="flex-1 overflow-x-auto rounded border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] px-2 py-1 font-mono text-[11px] text-[color:var(--cs-fg)]">
+                  {walletRpcUrl}
+                </code>
+                <button
+                  type="button"
+                  onClick={copyWalletRpcUrl}
+                  className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] px-2 text-[10px] font-medium transition-colors hover:bg-[color:var(--cs-hover)]"
+                >
+                  <Copy className="h-3 w-3" />
+                  {copied ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+              <ol className="list-decimal space-y-0.5 pl-4 text-[10px] text-[color:var(--cs-muted)]">
+                <li>Open MetaMask → Settings → Networks → Ethereum Mainnet → <strong>Add RPC URL</strong></li>
+                <li>Paste the URL above and save</li>
+                <li><strong>Click on it in the dropdown to SELECT it</strong> as the active provider</li>
+                <li>Switch to a different network, then switch back to Ethereum Mainnet to refresh your balance</li>
+                <li>For Rabby: go to Settings → Networks → Ethereum Mainnet → set the RPC URL above</li>
+              </ol>
+            </div>
+          ) : null}
           <div className="grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-[11px] sm:grid-cols-4">
             <Info label="Address" value={shortAddress(wallet.address)} />
             <Info label="Chain" value={wallet.chainIdHex ?? '—'} />
@@ -664,6 +764,9 @@ export function FoundrySettingsCard() {
             </button>
             <button disabled={switching} onClick={() => void onSwitchWalletChain()} className={btnClass}>
               {switching ? 'Switching…' : 'Switch to Foundry Chain'}
+            </button>
+            <button disabled={probingWalletBalance} onClick={() => void onProbeWalletBalance()} className={btnClass}>
+              {probingWalletBalance ? 'Probing…' : 'Probe Wallet Balance'}
             </button>
             <button type="button" onClick={() => clearWallet()} className={btnClass}>
               Clear Session

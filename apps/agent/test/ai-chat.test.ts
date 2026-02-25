@@ -512,6 +512,117 @@ describe('agent /ai/chat', () => {
     await close();
   });
 
+  it('auto-seeds intruder payloads when run_intruder_attack omits payload sets', async () => {
+    process.env.OPENAI_API_KEY = 'test-openai-key';
+    process.env.OPENAI_MODEL = 'gpt-4.1-mini';
+
+    const upstream = http.createServer((req, res) => {
+      const target = new URL(req.url ?? '/', 'http://127.0.0.1');
+      const value = target.searchParams.get('u') ?? 'none';
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: true, value }));
+    });
+    const upstreamPort = await listen(upstream);
+
+    let callCount = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      callCount += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as { messages?: Array<{ role?: string; content?: string }> };
+      expect(Array.isArray(body.messages)).toBe(true);
+
+      if (callCount === 1) {
+        return new Response(
+          JSON.stringify({
+            model: 'gpt-4.1-mini',
+            choices: [
+              {
+                message: {
+                  role: 'assistant',
+                  content: '',
+                  tool_calls: [
+                    {
+                      id: 'call_intruder_missing_payloads',
+                      type: 'function',
+                      function: {
+                        name: 'run_intruder_attack',
+                        arguments: JSON.stringify({
+                          method: 'GET',
+                          url: `http://127.0.0.1:${upstreamPort}/echo?u=§seed§`,
+                          attackType: 'sniper',
+                          maxRequests: 6,
+                          concurrency: 2,
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+
+      const toolMessage = findLastToolMessage(body.messages);
+      const toolPayload = JSON.parse(String(toolMessage?.content ?? '{}')) as {
+        requestCount?: number;
+        payloadFallback?: { mode?: string } | null;
+      };
+      expect((toolPayload.requestCount ?? 0) > 0).toBe(true);
+      expect(toolPayload.payloadFallback).toBeTruthy();
+      expect(
+        toolPayload.payloadFallback?.mode === 'catalog_query' ||
+          toolPayload.payloadFallback?.mode === 'built_in_defaults',
+      ).toBe(true);
+
+      return new Response(
+        JSON.stringify({
+          model: 'gpt-4.1-mini',
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content: 'Summary\\n- Intruder fallback worked.',
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cipherscope-agent-ai-'));
+    const dbPath = path.join(tmpDir, 'agent.db');
+    const { app, close } = await buildApp({
+      dbPath,
+      agentName: 'cipherscope-agent',
+      agentVersion: '0.0.0-test',
+      proxyHost: '127.0.0.1',
+      proxyPort: 0,
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/ai/chat',
+      payload: {
+        mode: 'smart_contract_audit',
+        maxSteps: 3,
+        messages: [{ role: 'user', content: 'Run an intruder attack against the last request.' }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const json = res.json();
+    expect(json.ok).toBe(true);
+    expect(json.toolCalls[0].name).toBe('run_intruder_attack');
+    expect(json.toolCalls[0].ok).toBe(true);
+    expect(String(json.toolCalls[0].summary)).toContain('fallback');
+    expect(callCount).toBe(2);
+
+    await close();
+    upstream.close();
+  });
+
   it('applies status filtering before pagination for list_findings tool', async () => {
     process.env.OPENAI_API_KEY = 'test-openai-key';
     process.env.OPENAI_MODEL = 'gpt-4.1-mini';

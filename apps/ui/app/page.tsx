@@ -715,7 +715,7 @@ export default function Home() {
     });
   }
 
-  async function onExecute() {
+  async function onExecute(mode: 'default' | 'simulate' | 'wallet' = 'default') {
     setBusy(true);
     setError(null);
     setStatus(null);
@@ -725,6 +725,7 @@ export default function Home() {
     try {
       const to = contractAddress.trim();
       const data = hexData.trim();
+      const shouldSimulate = mode === 'simulate' || (mode === 'default' && simulateOnly);
       let runtimeSettings = settings;
       const gasHex = parsePositiveIntToHex(gasLimit);
       const valueWei = parseEthToWei(valueEth);
@@ -740,8 +741,11 @@ export default function Home() {
       }
 
       const fromOverride = simulateFromOverride.trim();
-      if (simulateOnly && fromOverride && !isAddress(fromOverride)) {
+      if (shouldSimulate && fromOverride && !isAddress(fromOverride)) {
         throw new Error('Simulation "from" override must be a 20-byte hex address.');
+      }
+      if (mode === 'wallet' && !wallet.address) {
+        throw new Error('No connected wallet found. Connect wallet from Settings first.');
       }
 
       // If you're calling a mainnet address on a non-forked Anvil chain, eth_call will usually return `0x`.
@@ -755,7 +759,11 @@ export default function Home() {
         });
 
         if (isEmptyBytecode(code)) {
-          const autoResolved = await tryAutoResolveMissingBytecode(to, runtimeSettings, simulateOnly);
+          const autoResolved = await tryAutoResolveMissingBytecode(
+            to,
+            runtimeSettings,
+            shouldSimulate,
+          );
           if (autoResolved) {
             runtimeSettings = autoResolved.settings;
             code = await callFoundryRpc<string>({
@@ -776,8 +784,10 @@ export default function Home() {
       }
 
       const txParams: EthereumTxParams = {
-        from: simulateOnly
+        from: shouldSimulate
           ? fromOverride || selectedSigner || undefined
+          : mode === 'wallet'
+            ? wallet.address ?? undefined
           : selectedSigner || undefined,
         to,
         data,
@@ -785,10 +795,10 @@ export default function Home() {
         gas: gasHex ?? undefined,
       };
 
-      if (simulateOnly) {
+      if (shouldSimulate) {
         await runSimulation(txParams, startedAt, runtimeSettings);
       } else {
-        const signerSource = selectedSignerOption?.source;
+        const signerSource = mode === 'wallet' ? 'wallet' : selectedSignerOption?.source;
         if (!signerSource)
           throw new Error('No signer selected. Choose wallet or a prefunded dev account.');
         await runTransaction(txParams, startedAt, signerSource, runtimeSettings);
@@ -865,20 +875,35 @@ export default function Home() {
             </div>
           </div>
 
+          {simulateOnly ? (
+            <IconButton
+              label={busy ? 'Running simulation' : 'Simulate'}
+              onClick={() => void onExecute('simulate')}
+              disabled={busy}
+              className="border-[color:var(--cs-accent)] bg-[color:var(--cs-accent)] text-white shadow-lg shadow-blue-500/20 hover:bg-blue-600 hover:text-white"
+            >
+              <Activity className={`h-4 w-4 ${busy ? 'animate-spin' : ''}`} />
+            </IconButton>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void onExecute()}
+              disabled={busy || !selectedSigner}
+              className="inline-flex h-11 items-center gap-2 rounded-lg bg-[color:var(--cs-accent)] px-5 text-[14px] font-semibold text-white shadow-lg shadow-blue-500/20 transition-all hover:bg-blue-600 disabled:opacity-60"
+            >
+              <SendHorizontal className="h-4 w-4" />
+              {busy ? 'Running…' : selectedSigner ? 'Send' : 'Select Signer'}
+            </button>
+          )}
+
           <button
             type="button"
-            onClick={() => void onExecute()}
-            disabled={busy || (!simulateOnly && !selectedSigner)}
-            className="inline-flex h-11 items-center gap-2 rounded-lg bg-[color:var(--cs-accent)] px-5 text-[14px] font-semibold text-white shadow-lg shadow-blue-500/20 transition-all hover:bg-blue-600 disabled:opacity-60"
+            onClick={() => void onExecute('wallet')}
+            disabled={busy || !wallet.address}
+            className="inline-flex h-11 items-center gap-2 rounded-lg border border-[color:var(--cs-border)] bg-[color:var(--cs-panel-soft)] px-4 text-[13px] font-semibold text-[color:var(--cs-fg)] transition-colors hover:bg-[color:var(--cs-hover)] disabled:opacity-60"
           >
-            <SendHorizontal className="h-4 w-4" />
-            {busy
-              ? 'Running…'
-              : simulateOnly
-                ? 'Simulate'
-                : selectedSigner
-                  ? 'Send'
-                  : 'Select Signer'}
+            <Wallet className="h-4 w-4" />
+            Run in Wallet
           </button>
 
           <IconButton label="Copy Result" onClick={() => void onCopyResult()}>
@@ -1406,14 +1431,21 @@ function BalanceChange({
   );
 }
 
-function IconButton(props: { label: string; children: ReactNode; onClick?: () => void }) {
+function IconButton(props: {
+  label: string;
+  children: ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  className?: string;
+}) {
   return (
     <button
       type="button"
       aria-label={props.label}
       title={props.label}
       onClick={props.onClick}
-      className="inline-flex h-11 w-11 items-center justify-center rounded-lg border border-[color:var(--cs-border)] bg-[color:var(--cs-panel-soft)] text-[color:var(--cs-muted)] transition-colors hover:bg-[color:var(--cs-hover)] hover:text-[color:var(--cs-fg)]"
+      disabled={props.disabled}
+      className={`inline-flex h-11 w-11 items-center justify-center rounded-lg border border-[color:var(--cs-border)] bg-[color:var(--cs-panel-soft)] text-[color:var(--cs-muted)] transition-colors hover:bg-[color:var(--cs-hover)] hover:text-[color:var(--cs-fg)] disabled:opacity-60 ${props.className ?? ''}`}
     >
       {props.children}
     </button>
