@@ -1,13 +1,22 @@
 import { AiChatRequestSchema } from '@cipherscope/proto';
+import { fetch as undiciFetch, Agent } from 'undici';
 
 const agentHttpUrl = process.env.AGENT_HTTP_URL ?? 'http://127.0.0.1:17400';
 const RETRY_MAX_ATTEMPTS = 8;
 const RETRY_BASE_DELAY_MS = 750;
 const RETRY_MAX_DELAY_MS = 8000;
 
+// Reusable agent with no timeouts for long-running streams
+const streamDispatcher = new Agent({
+  bodyTimeout: 0,
+  headersTimeout: 0,
+});
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request): Promise<Response> {
   let body: unknown;
@@ -32,12 +41,14 @@ export async function POST(req: Request): Promise<Response> {
 
   let upstream: Response | null = null;
   for (let attempt = 1; attempt <= RETRY_MAX_ATTEMPTS; attempt += 1) {
-    upstream = await fetch(`${agentHttpUrl.replace(/\/$/, '')}/ai/chat/stream`, {
+    const _res = await undiciFetch(`${agentHttpUrl.replace(/\/$/, '')}/ai/chat/stream`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(parsed),
-      cache: 'no-store',
-    }).catch(() => null);
+      dispatcher: streamDispatcher,
+    }).catch(console.error);
+    upstream = _res ? (_res as unknown as Response) : null;
+    
     if (upstream) break;
     if (attempt >= RETRY_MAX_ATTEMPTS) break;
     const delayMs = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
@@ -65,10 +76,37 @@ export async function POST(req: Request): Promise<Response> {
 
   const headers = new Headers();
   headers.set('content-type', upstream.headers.get('content-type') ?? 'text/event-stream; charset=utf-8');
-  headers.set('cache-control', 'no-store');
+  headers.set('cache-control', 'no-store, no-transform');
   headers.set('x-accel-buffering', 'no');
+  headers.set('x-vercel-buffering', 'no');
+  headers.set('x-no-compression', '1');
+  headers.set('content-encoding', 'none');
+  headers.set('connection', 'keep-alive');
 
-  return new Response(upstream.body, {
+  const stream = new ReadableStream({
+    async start(controller) {
+      if (!upstream!.body) {
+        controller.close();
+        return;
+      }
+      
+      const reader = (upstream!.body as any).getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          controller.enqueue(value);
+        }
+      } catch (err) {
+        console.error('Stream read error:', err);
+        controller.error(err);
+      } finally {
+        controller.close();
+      }
+    }
+  });
+
+  return new Response(stream, {
     status: upstream.status,
     headers,
   });

@@ -2,6 +2,17 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
 import type WebSocket from 'ws';
 import path from 'node:path';
+import { fetch as undiciFetch, Agent as UndiciAgent } from 'undici';
+
+const aiDispatcher = new UndiciAgent({
+  bodyTimeout: 0,
+  headersTimeout: 0,
+});
+
+async function aiFetchImpl(url: string | URL, init?: RequestInit): Promise<Response> {
+  return undiciFetch(url, { ...(init as any), dispatcher: aiDispatcher }) as unknown as Promise<Response>;
+}
+
 import {
   AiChatRequestSchema,
   AiChatResponseSchema,
@@ -1639,6 +1650,7 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
       aiModel: selectedModel,
       aiBaseUrl: providerConfig.baseUrl,
       aiExtraHeaders: providerConfig.extraHeaders,
+      fetchImpl: aiFetchImpl as unknown as typeof fetch,
       publishEvent,
       onProgress,
       rpcCall: async (method, params = []) => await foundry.rpcCall(method, params),
@@ -1744,6 +1756,10 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
       });
     };
 
+    const heartbeat = setInterval(() => {
+      if (!closed) raw.write(': \n\n'); // SSE comment for keep-alive
+    }, 15000);
+
     try {
       const result = await runChatWithResolvedConfig(body, (event) => {
         writeEvent(event);
@@ -1761,6 +1777,7 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
       const message = err instanceof Error ? err.message : String(err);
       writeError('ai_chat_failed', message);
     } finally {
+      clearInterval(heartbeat);
       if (!closed) raw.end();
     }
   });

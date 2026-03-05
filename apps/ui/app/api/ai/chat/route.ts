@@ -1,9 +1,16 @@
 import { AiChatRequestSchema } from '@cipherscope/proto';
+import { fetch as undiciFetch, Agent } from 'undici';
 
 const agentHttpUrl = process.env.AGENT_HTTP_URL ?? 'http://127.0.0.1:17400';
 const RETRY_MAX_ATTEMPTS = 8;
 const RETRY_BASE_DELAY_MS = 750;
 const RETRY_MAX_DELAY_MS = 8000;
+
+// Reusable agent with no timeouts for long-running AI requests
+const aiDispatcher = new Agent({
+  bodyTimeout: 0,
+  headersTimeout: 0, // AI requests could take a long time to get the first byte too if it's doing heavy thinking
+});
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -32,12 +39,14 @@ export async function POST(req: Request): Promise<Response> {
 
   let upstream: Response | null = null;
   for (let attempt = 1; attempt <= RETRY_MAX_ATTEMPTS; attempt += 1) {
-    upstream = await fetch(`${agentHttpUrl.replace(/\/$/, '')}/ai/chat`, {
+    const _res = await undiciFetch(`${agentHttpUrl.replace(/\/$/, '')}/ai/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(parsed),
-      cache: 'no-store',
-    }).catch(() => null);
+      dispatcher: aiDispatcher,
+    }).catch(console.error);
+    upstream = _res ? (_res as unknown as Response) : null;
+    
     if (upstream) break;
     if (attempt >= RETRY_MAX_ATTEMPTS) break;
     const delayMs = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));

@@ -3119,6 +3119,7 @@ async function callOpenAiChat(input: {
   messages: OpenAiConversationMessage[];
   fetchImpl: typeof fetch;
   temperature?: number | null;
+  onProgress?: (event: unknown) => void;
 }): Promise<{ model: string; message: OpenAiAssistantMessage }> {
   const url = `${input.baseUrl.replace(/\/$/, '')}/chat/completions`;
 
@@ -3127,6 +3128,7 @@ async function callOpenAiChat(input: {
     messages: input.messages,
     tools: OPENAI_TOOLS,
     tool_choice: 'auto',
+    stream: true,
   };
   if (input.temperature != null) body.temperature = input.temperature;
 
@@ -3140,14 +3142,11 @@ async function callOpenAiChat(input: {
     body: JSON.stringify(body),
   });
 
-  let json: unknown = null;
-  try {
-    json = await res.json();
-  } catch {
-    json = null;
-  }
-
   if (!res.ok) {
+    let json: unknown = null;
+    try {
+      json = await res.json();
+    } catch {}
     const message =
       (json as { error?: { message?: unknown } } | null)?.error?.message ??
       `AI request failed (${res.status}).`;
@@ -3159,17 +3158,142 @@ async function callOpenAiChat(input: {
     });
   }
 
-  const parsed = json as OpenAiResponse;
-  const choice = Array.isArray(parsed.choices) ? parsed.choices[0] : undefined;
-  const message = choice?.message;
-  if (!message || typeof message !== 'object') {
-    throw new Error('OpenAI response missing assistant message.');
+  if (!res.body) throw new Error('No body in OpenAI response');
+
+  const reader = res.body.getReader() as unknown as { read: () => Promise<{ done: boolean; value?: Uint8Array }> };
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+
+  let content = '';
+  const incomingToolCalls: Record<number, { id: string; type: 'function'; function: { name: string; arguments: string } }> = {};
+  let lastStatusMs = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+      
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary !== -1) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf('\n\n');
+        
+        if (!block.startsWith('data: ')) continue;
+        const dataStr = block.slice(6).trim();
+        if (dataStr === '[DONE]') break;
+        if (!dataStr) continue;
+
+        try {
+          const json = JSON.parse(dataStr) as any;
+          const choice = Array.isArray(json.choices) ? json.choices[0] : null;
+          if (!choice || !choice.delta) continue;
+          const delta = choice.delta;
+
+          if (input.onProgress) {
+             const now = Date.now();
+             if (now - lastStatusMs > 1500) {
+               lastStatusMs = now;
+               input.onProgress({
+                 type: 'status',
+                 createdAt: new Date().toISOString(),
+                 message: 'Reasoning...',
+               });
+             }
+          }
+
+          if (typeof delta.content === 'string' && delta.content) {
+            content += delta.content;
+          }
+
+          if (Array.isArray(delta.tool_calls)) {
+            for (const call of delta.tool_calls) {
+              const idx = call.index;
+              if (idx === undefined || idx === null) continue;
+              if (!incomingToolCalls[idx]) {
+                incomingToolCalls[idx] = {
+                  id: (call.id as string) || randomUUID(),
+                  type: 'function',
+                  function: { name: call.function?.name || '', arguments: '' },
+                };
+              }
+              if (call.function?.arguments) {
+                incomingToolCalls[idx].function.arguments += call.function.arguments;
+              }
+              if (call.id && incomingToolCalls[idx].id !== call.id && !incomingToolCalls[idx].id.includes('-')) {
+                 incomingToolCalls[idx].id = call.id;
+              }
+            }
+          }
+        } catch {
+          // Ignore incomplete blocks gracefully
+        }
+      }
+    }
+    
+    // Process any remaining tail
+    buffer += decoder.decode().replace(/\r\n/g, '\n');
+    let boundary = buffer.indexOf('\n\n');
+    while (boundary !== -1) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      boundary = buffer.indexOf('\n\n');
+      if (!block.startsWith('data: ')) continue;
+      const dataStr = block.slice(6).trim();
+      if (dataStr === '[DONE]') break;
+      if (!dataStr) continue;
+
+      try {
+        const json = JSON.parse(dataStr) as any;
+        const choice = Array.isArray(json.choices) ? json.choices[0] : null;
+        if (!choice || !choice.delta) continue;
+        const delta = choice.delta;
+
+        if (typeof delta.content === 'string' && delta.content) {
+          content += delta.content;
+        }
+
+        if (Array.isArray(delta.tool_calls)) {
+          for (const call of delta.tool_calls) {
+            const idx = call.index;
+            if (idx === undefined || idx === null) continue;
+            if (!incomingToolCalls[idx]) {
+              incomingToolCalls[idx] = {
+                id: (call.id as string) || randomUUID(),
+                type: 'function',
+                function: { name: call.function?.name || '', arguments: '' },
+              };
+            }
+            if (call.function?.arguments) {
+              incomingToolCalls[idx].function.arguments += call.function.arguments;
+            }
+          }
+        }
+      } catch {}
+    }
+
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+       // Just abort gracefully if possible
+    } else {
+       console.error('[callOpenAiChat] Stream reading error:', err);
+    }
   }
 
-  return {
-    model: typeof parsed.model === 'string' && parsed.model ? parsed.model : input.model,
-    message,
+  const message: OpenAiAssistantMessage = {
+    role: 'assistant',
+    content,
   };
+
+  const finalTools = Object.values(incomingToolCalls);
+  if (finalTools.length > 0) {
+    message.tool_calls = finalTools;
+  }
+
+  return { model: input.model, message };
 }
 
 async function callClaudeChat(input: {
@@ -4573,6 +4697,7 @@ export async function runAiAgentChat(input: RunAiAgentChatInput): Promise<AiChat
               messages: conversation,
               fetchImpl,
               temperature: aiTemperature,
+              onProgress: emitProgress,
             });
     } catch (err) {
       // If the default model isn't available for the key/org, fall back once to a widely available option.
@@ -4593,6 +4718,7 @@ export async function runAiAgentChat(input: RunAiAgentChatInput): Promise<AiChat
           extraHeaders: input.aiExtraHeaders,
           messages: conversation,
           fetchImpl,
+          onProgress: emitProgress,
           // Keep the same temperature policy while falling back.
           temperature: temperatureOverride != null ? temperatureOverride : shouldOmitTemperature(fallback) ? null : 0.2,
         });
