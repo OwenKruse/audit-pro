@@ -634,6 +634,68 @@ describe('agent /ai/chat', () => {
     await close();
   });
 
+  it(
+    'completes when provider emits [DONE] without closing the stream immediately',
+    async () => {
+      process.env.DEEPSEEK_API_KEY = 'test-deepseek-key';
+      process.env.DEEPSEEK_BASE_URL = 'https://deepseek.example.invalid/v1';
+
+      globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { stream?: unknown };
+        expect(body.stream).toBe(true);
+
+        const encoder = new TextEncoder();
+        const ssePayload =
+          `data: ${JSON.stringify({
+            model: 'deepseek-chat',
+            choices: [{ delta: { content: 'Summary\\n- Completed from streamed response.' } }],
+          })}\n\n` +
+          'data: [DONE]\n\n';
+
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(ssePayload));
+            // Intentionally do not close: some providers can delay socket close after [DONE].
+          },
+        });
+
+        return new Response(stream, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+        });
+      }) as typeof fetch;
+
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cipherscope-agent-ai-'));
+      const dbPath = path.join(tmpDir, 'agent.db');
+      const { app, close } = await buildApp({
+        dbPath,
+        agentName: 'cipherscope-agent',
+        agentVersion: '0.0.0-test',
+        proxyHost: '127.0.0.1',
+        proxyPort: 0,
+      });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/ai/chat',
+        payload: {
+          provider: 'deepseek',
+          mode: 'smart_contract_audit',
+          maxSteps: 3,
+          messages: [{ role: 'user', content: 'Provide a short summary.' }],
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const json = res.json();
+      expect(json.ok).toBe(true);
+      expect(String(json.assistant?.content ?? '')).toContain('Completed from streamed response');
+
+      await close();
+    },
+    4000,
+  );
+
   it('auto-seeds intruder payloads when run_intruder_attack omits payload sets', async () => {
     process.env.OPENAI_API_KEY = 'test-openai-key';
     process.env.OPENAI_MODEL = 'gpt-4.1-mini';

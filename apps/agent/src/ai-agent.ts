@@ -3119,7 +3119,7 @@ async function callOpenAiChat(input: {
   messages: OpenAiConversationMessage[];
   fetchImpl: typeof fetch;
   temperature?: number | null;
-  onProgress?: (event: unknown) => void;
+  onProgress?: (event: AiChatProgressEvent) => void;
 }): Promise<{ model: string; message: OpenAiAssistantMessage }> {
   const url = `${input.baseUrl.replace(/\/$/, '')}/chat/completions`;
 
@@ -3146,7 +3146,9 @@ async function callOpenAiChat(input: {
     let json: unknown = null;
     try {
       json = await res.json();
-    } catch {}
+    } catch {
+      // Ignore non-JSON error payloads.
+    }
     const message =
       (json as { error?: { message?: unknown } } | null)?.error?.message ??
       `AI request failed (${res.status}).`;
@@ -3160,126 +3162,248 @@ async function callOpenAiChat(input: {
 
   if (!res.body) throw new Error('No body in OpenAI response');
 
-  const reader = res.body.getReader() as unknown as { read: () => Promise<{ done: boolean; value?: Uint8Array }> };
+  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+  if (!contentType.includes('text/event-stream')) {
+    let json: OpenAiResponse | null = null;
+    try {
+      json = (await res.json()) as OpenAiResponse;
+    } catch {
+      json = null;
+    }
+    const model = typeof json?.model === 'string' && json.model.trim() ? json.model : input.model;
+    const assistant = Array.isArray(json?.choices) ? json.choices[0]?.message : undefined;
+    const content = parseAssistantContent(assistant?.content);
+    const toolCalls = Array.isArray(assistant?.tool_calls)
+      ? assistant.tool_calls
+          .map((call, index) => {
+            const id = typeof call.id === 'string' && call.id.trim() ? call.id : `tool_${index + 1}`;
+            const name = typeof call.function?.name === 'string' ? call.function.name : '';
+            if (!name) return null;
+            const rawArgs = call.function?.arguments;
+            const argsString =
+              typeof rawArgs === 'string'
+                ? rawArgs
+                : rawArgs == null
+                  ? ''
+                  : safeJsonStringify(rawArgs, 12000);
+            return {
+              id,
+              type: 'function',
+              function: {
+                name,
+                arguments: argsString,
+              },
+            } as ToolCall;
+          })
+          .filter((call): call is ToolCall => call != null)
+      : [];
+
+    return {
+      model,
+      message: {
+        role: 'assistant',
+        content,
+        ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+      },
+    };
+  }
+
+  const reader = res.body.getReader() as unknown as {
+    read: () => Promise<{ done: boolean; value?: Uint8Array }>;
+    cancel?: () => Promise<void>;
+  };
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+  let sawDone = false;
+  let responseModel = input.model;
 
   let content = '';
-  const incomingToolCalls: Record<number, { id: string; type: 'function'; function: { name: string; arguments: string } }> = {};
+  const incomingToolCalls = new Map<number, { id: string; type: 'function'; function: { name: string; arguments: string } }>();
   let lastStatusMs = 0;
 
+  const upsertToolCall = (inputCall: { index: unknown; id: unknown; name: unknown; args: unknown }): void => {
+    let idx: number;
+    if (typeof inputCall.index === 'number' && Number.isInteger(inputCall.index) && inputCall.index >= 0) {
+      idx = inputCall.index;
+    } else if (typeof inputCall.index === 'string') {
+      const parsed = Number.parseInt(inputCall.index, 10);
+      idx = Number.isInteger(parsed) && parsed >= 0 ? parsed : incomingToolCalls.size;
+    } else {
+      idx = incomingToolCalls.size;
+    }
+
+    const existing = incomingToolCalls.get(idx) ?? {
+      id:
+        typeof inputCall.id === 'string' && inputCall.id.trim()
+          ? inputCall.id
+          : randomUUID(),
+      type: 'function' as const,
+      function: { name: '', arguments: '' },
+    };
+
+    if (typeof inputCall.id === 'string' && inputCall.id.trim()) {
+      existing.id = inputCall.id;
+    }
+    if (typeof inputCall.name === 'string' && inputCall.name) {
+      existing.function.name = inputCall.name;
+    }
+    if (typeof inputCall.args === 'string' && inputCall.args) {
+      existing.function.arguments += inputCall.args;
+    } else if (inputCall.args != null && typeof inputCall.args === 'object') {
+      existing.function.arguments += safeJsonStringify(inputCall.args, 12000);
+    }
+
+    incomingToolCalls.set(idx, existing);
+  };
+
+  const consumeSseBlock = (block: string): void => {
+    const lines = block.replace(/\r/g, '').split('\n');
+    const dataLines: string[] = [];
+    for (const line of lines) {
+      if (!line || line.startsWith(':')) continue;
+      if (line.startsWith('data:')) dataLines.push(line.slice('data:'.length).trimStart());
+    }
+    if (dataLines.length === 0) return;
+
+    const dataStr = dataLines.join('\n').trim();
+    if (!dataStr) return;
+    if (dataStr === '[DONE]') {
+      sawDone = true;
+      return;
+    }
+
+    let json: unknown;
+    try {
+      json = JSON.parse(dataStr) as unknown;
+    } catch {
+      return;
+    }
+
+    if (!json || typeof json !== 'object' || Array.isArray(json)) return;
+    const rec = json as Record<string, unknown>;
+    if (typeof rec.model === 'string' && rec.model.trim()) {
+      responseModel = rec.model;
+    }
+
+    const error = rec.error;
+    if (error && typeof error === 'object' && !Array.isArray(error)) {
+      const message = (error as { message?: unknown }).message;
+      if (typeof message === 'string' && message.trim()) {
+        throw new Error(message);
+      }
+    }
+
+    const choices = Array.isArray(rec.choices) ? rec.choices : [];
+    const choice = choices[0];
+    if (!choice || typeof choice !== 'object' || Array.isArray(choice)) return;
+    const choiceRec = choice as Record<string, unknown>;
+
+    const delta = choiceRec.delta;
+    if (delta && typeof delta === 'object' && !Array.isArray(delta)) {
+      if (input.onProgress) {
+        const now = Date.now();
+        if (now - lastStatusMs > 1500) {
+          lastStatusMs = now;
+          input.onProgress({
+            type: 'status',
+            createdAt: new Date().toISOString(),
+            message: 'Reasoning...',
+          });
+        }
+      }
+
+      const deltaRec = delta as Record<string, unknown>;
+      if (typeof deltaRec.content === 'string' && deltaRec.content) {
+        content += deltaRec.content;
+      }
+      if (Array.isArray(deltaRec.tool_calls)) {
+        for (const rawCall of deltaRec.tool_calls) {
+          if (!rawCall || typeof rawCall !== 'object' || Array.isArray(rawCall)) continue;
+          const callRec = rawCall as Record<string, unknown>;
+          const fnRec =
+            callRec.function && typeof callRec.function === 'object' && !Array.isArray(callRec.function)
+              ? (callRec.function as Record<string, unknown>)
+              : null;
+          upsertToolCall({
+            index: callRec.index,
+            id: callRec.id,
+            name: fnRec?.name,
+            args: fnRec?.arguments,
+          });
+        }
+      }
+    }
+
+    const message = choiceRec.message;
+    if (message && typeof message === 'object' && !Array.isArray(message)) {
+      const messageRec = message as Record<string, unknown>;
+      if (!content) {
+        const parsedContent = parseAssistantContent(messageRec.content);
+        if (parsedContent) content = parsedContent;
+      }
+      if (Array.isArray(messageRec.tool_calls)) {
+        for (const [index, rawCall] of messageRec.tool_calls.entries()) {
+          if (!rawCall || typeof rawCall !== 'object' || Array.isArray(rawCall)) continue;
+          const callRec = rawCall as Record<string, unknown>;
+          const fnRec =
+            callRec.function && typeof callRec.function === 'object' && !Array.isArray(callRec.function)
+              ? (callRec.function as Record<string, unknown>)
+              : null;
+          upsertToolCall({
+            index: callRec.index ?? index,
+            id: callRec.id,
+            name: fnRec?.name,
+            args: fnRec?.arguments,
+          });
+        }
+      }
+    }
+  };
+
   try {
-    while (true) {
+    while (!sawDone) {
       const { done, value } = await reader.read();
       if (done) break;
       if (!value) continue;
-      
+
       buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
-      
+
       let boundary = buffer.indexOf('\n\n');
       while (boundary !== -1) {
         const block = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary + 2);
+        consumeSseBlock(block);
+        if (sawDone) break;
         boundary = buffer.indexOf('\n\n');
-        
-        if (!block.startsWith('data: ')) continue;
-        const dataStr = block.slice(6).trim();
-        if (dataStr === '[DONE]') break;
-        if (!dataStr) continue;
-
-        try {
-          const json = JSON.parse(dataStr) as any;
-          const choice = Array.isArray(json.choices) ? json.choices[0] : null;
-          if (!choice || !choice.delta) continue;
-          const delta = choice.delta;
-
-          if (input.onProgress) {
-             const now = Date.now();
-             if (now - lastStatusMs > 1500) {
-               lastStatusMs = now;
-               input.onProgress({
-                 type: 'status',
-                 createdAt: new Date().toISOString(),
-                 message: 'Reasoning...',
-               });
-             }
-          }
-
-          if (typeof delta.content === 'string' && delta.content) {
-            content += delta.content;
-          }
-
-          if (Array.isArray(delta.tool_calls)) {
-            for (const call of delta.tool_calls) {
-              const idx = call.index;
-              if (idx === undefined || idx === null) continue;
-              if (!incomingToolCalls[idx]) {
-                incomingToolCalls[idx] = {
-                  id: (call.id as string) || randomUUID(),
-                  type: 'function',
-                  function: { name: call.function?.name || '', arguments: '' },
-                };
-              }
-              if (call.function?.arguments) {
-                incomingToolCalls[idx].function.arguments += call.function.arguments;
-              }
-              if (call.id && incomingToolCalls[idx].id !== call.id && !incomingToolCalls[idx].id.includes('-')) {
-                 incomingToolCalls[idx].id = call.id;
-              }
-            }
-          }
-        } catch {
-          // Ignore incomplete blocks gracefully
-        }
       }
     }
-    
-    // Process any remaining tail
-    buffer += decoder.decode().replace(/\r\n/g, '\n');
-    let boundary = buffer.indexOf('\n\n');
-    while (boundary !== -1) {
-      const block = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      boundary = buffer.indexOf('\n\n');
-      if (!block.startsWith('data: ')) continue;
-      const dataStr = block.slice(6).trim();
-      if (dataStr === '[DONE]') break;
-      if (!dataStr) continue;
 
-      try {
-        const json = JSON.parse(dataStr) as any;
-        const choice = Array.isArray(json.choices) ? json.choices[0] : null;
-        if (!choice || !choice.delta) continue;
-        const delta = choice.delta;
-
-        if (typeof delta.content === 'string' && delta.content) {
-          content += delta.content;
-        }
-
-        if (Array.isArray(delta.tool_calls)) {
-          for (const call of delta.tool_calls) {
-            const idx = call.index;
-            if (idx === undefined || idx === null) continue;
-            if (!incomingToolCalls[idx]) {
-              incomingToolCalls[idx] = {
-                id: (call.id as string) || randomUUID(),
-                type: 'function',
-                function: { name: call.function?.name || '', arguments: '' },
-              };
-            }
-            if (call.function?.arguments) {
-              incomingToolCalls[idx].function.arguments += call.function.arguments;
-            }
-          }
-        }
-      } catch {}
+    if (sawDone && typeof reader.cancel === 'function') {
+      await reader.cancel().catch(() => undefined);
     }
 
+    if (!sawDone) {
+      // Process any remaining tail if the upstream closes without an explicit [DONE] marker.
+      buffer += decoder.decode().replace(/\r\n/g, '\n');
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary !== -1) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        consumeSseBlock(block);
+        if (sawDone) break;
+        boundary = buffer.indexOf('\n\n');
+      }
+      const tail = buffer.trim();
+      if (tail && !sawDone) {
+        consumeSseBlock(tail);
+      }
+    }
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') {
-       // Just abort gracefully if possible
+      // Just abort gracefully if possible.
     } else {
-       console.error('[callOpenAiChat] Stream reading error:', err);
+      console.error('[callOpenAiChat] Stream reading error:', err);
+      throw err;
     }
   }
 
@@ -3288,12 +3412,15 @@ async function callOpenAiChat(input: {
     content,
   };
 
-  const finalTools = Object.values(incomingToolCalls);
+  const finalTools = Array.from(incomingToolCalls.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([, call]) => call)
+    .filter((call) => call.function.name);
   if (finalTools.length > 0) {
     message.tool_calls = finalTools;
   }
 
-  return { model: input.model, message };
+  return { model: responseModel, message };
 }
 
 async function callClaudeChat(input: {

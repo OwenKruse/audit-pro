@@ -1746,6 +1746,9 @@ export async function buildApp(opts: BuildAppOpts): Promise<{
           : 'message';
       raw.write(`event: ${kind}\n`);
       raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      if (typeof (raw as NodeJS.WritableStream & { flush?: () => void }).flush === 'function') {
+        (raw as NodeJS.WritableStream & { flush: () => void }).flush();
+      }
     };
 
     const writeError = (code: string, message: string): void => {

@@ -752,6 +752,7 @@ export function RunnerPanel() {
 
   const abortRef = useRef<AbortController | null>(null);
   const runningConversationIdRef = useRef<string | null>(null);
+  const runCompletedSuccessfullyRef = useRef(false);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
   const { conversations, selectedConversationId } = conversationStore;
@@ -767,7 +768,7 @@ export function RunnerPanel() {
   const aiProvider = aiSettings.provider;
   const aiModel = getSelectedAiModel(aiSettings);
   const visibleLiveTrace =
-    busy && selectedConversation && selectedConversation.id === liveTraceConversationId ? liveTraceLines : [];
+    selectedConversation && selectedConversation.id === liveTraceConversationId ? liveTraceLines : [];
 
   function updateConversation(
     id: string,
@@ -978,6 +979,13 @@ export function RunnerPanel() {
       parsed.status === 'completed'
         ? 'Run complete.'
         : 'Run hit max autonomous steps.';
+    const statusLine =
+      failureCount > 0 ?
+        `${baseStatus} ${failureCount} tool call${failureCount === 1 ? '' : 's'} failed.`
+      : lastTool ?
+        `${baseStatus} Last action: ${lastTool.summary}`
+      : baseStatus;
+    appendLiveTrace(conversationId, statusLine);
     updateConversation(
       conversationId,
       (prev) => ({
@@ -986,12 +994,7 @@ export function RunnerPanel() {
             [...prev.messages, assistantMessage, diagnosticMessage]
           : [...prev.messages, assistantMessage],
         toolCalls: mergeFinalToolCalls(prev.toolCalls, parsed.toolCalls, parsed.assistant.createdAt),
-        statusLine:
-          failureCount > 0 ?
-            `${baseStatus} ${failureCount} tool call${failureCount === 1 ? '' : 's'} failed.`
-          : lastTool ?
-            `${baseStatus} Last action: ${lastTool.summary}`
-          : baseStatus,
+        statusLine,
       }),
       parsed.assistant.createdAt,
     );
@@ -1230,6 +1233,7 @@ export function RunnerPanel() {
     setLiveTraceConversationId(conversationId);
     setLiveTraceLines(['Connecting stream...']);
     runningConversationIdRef.current = conversationId;
+    runCompletedSuccessfullyRef.current = false;
 
     const maxStepsNum = Number.parseInt(conversation.maxSteps, 10);
     const boundedMaxSteps = Number.isFinite(maxStepsNum)
@@ -1264,6 +1268,7 @@ export function RunnerPanel() {
         }
       }
 
+      runCompletedSuccessfullyRef.current = true;
       applyCompletedRun(conversationId, parsed);
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
@@ -1304,7 +1309,9 @@ export function RunnerPanel() {
       if (runningConversationIdRef.current === conversationId) {
         runningConversationIdRef.current = null;
       }
-      clearLiveTrace(conversationId);
+      if (!runCompletedSuccessfullyRef.current) {
+        clearLiveTrace(conversationId);
+      }
       setBusy(false);
     }
   }
@@ -1600,6 +1607,19 @@ export function RunnerPanel() {
                       ))}
                     </div>
                   ) : null}
+                </div>
+              ) : visibleLiveTrace.length > 0 ? (
+                <div
+                  className="max-w-[85%] min-w-0 rounded-2xl border border-[color:var(--cs-border)] bg-[color:var(--cs-panel)] px-4 py-3 shadow-sm text-[color:var(--cs-fg)]"
+                  aria-label="Last run log"
+                >
+                  <div className="space-y-1 text-[12px] text-[color:var(--cs-muted)]">
+                    {visibleLiveTrace.map((line, idx) => (
+                      <div key={`${idx}_${line}`} className="break-words">
+                        {line}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ) : null}
             </div>
